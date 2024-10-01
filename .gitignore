@@ -1,0 +1,8 @@
+bams/
+.snakemake/
+genomes/
+mason*
+reads
+sim
+pops.txt
+vars*
