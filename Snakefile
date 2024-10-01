@@ -1,4 +1,4 @@
-MASON_BIN = "/Users/cade/dev/vcf-stuff/sim/mason2-2.0.9-Mac-x86_64/bin/mason_simulator"
+MASON_BIN = "mason2-2.0.9-Linux-x86_64/bin/mason_simulator"
 SAMPLES = [f"sample_{i}" for i in range(20)]
 SEQLEN = 10000
 COVERAGE = 60
@@ -9,14 +9,11 @@ MU=1e-8
 
 rule all:
     input:
-        expand("bams/{sample}.bam", sample=SAMPLES),
-        "vars.vcf.gz",
-        "pops.txt"
+        "pixy_pi.txt"
 
 rule simulate:
     output:
-        expand("sim/{sample}.fa", sample=SAMPLES),
-        "sim/sim.vcf",
+        temp(expand("sim/{sample}.vcf", sample=SAMPLES)),
         "sim/sim_results.txt",
         "sim/pi_windows.txt",
         "sim/ref.fa"
@@ -29,7 +26,8 @@ rule simulate:
         seqlen = SEQLEN,
         windows=1000
     script:
-        "msprime_test.py"
+        "scripts/simulate.py"
+
 rule bwa_index:
     input:
         "sim/ref.fa"
@@ -38,19 +36,30 @@ rule bwa_index:
     shell:
         "bwa index {input}"
 
+
 rule simulate_reads:
     input:
         mason = MASON_BIN,
-        ref = "sim/{sample}.fa"
+        ref = "sim/ref.fa",
+        vcf = "sim/{sample}.vcf"
     params:
         num_reads = NUM_READS,
-        seed = SEED
+        seed = SEED,
+        
     output:
-        r1= "reads/{sample}_R1.fq",
-        r2= "reads/{sample}_R2.fq"
+        r1 = temp("reads/{sample}_R1.fq"),
+        r2 = temp("reads/{sample}_R2.fq")
     shell:
-        "{input.mason} --seed {params.seed} -ir {input.ref} -n {params.num_reads} --illumina-read-length 150 -o {output.r1} -or {output.r2}"
-
+        """
+        {input.mason} \
+        --seed {params.seed} \
+        -ir {input.ref} \
+        -iv {input.vcf} \
+        -n {params.num_reads} \
+        --illumina-read-length 150 \
+        -o {output.r1} -or {output.r2}
+        """
+        
 
 rule bwa:
     input:
@@ -61,21 +70,22 @@ rule bwa:
     params:
         rg = r"'@RG\tID:{sample}\tSM:{sample}\tLB:{sample}\tPL:ILLUMINA'"
     output:
-        "bams/{sample}.bam"
+        temp("bams/{sample}.bam")
     shell:
         "bwa mem -R {params.rg} {input.ref} {input.r1} {input.r2} | samtools sort - | samtools view -b > {output}"
+
 
 rule bcftools:
     input:
         ref = "sim/ref.fa",
         bams = expand("bams/{sample}.bam", sample=SAMPLES)
     output:
-        "vars.vcf.gz"
+        "vcf/vars.vcf.gz"
     shell:
         "bcftools mpileup -f {input.ref} {input.bams} | bcftools call -m -Oz -f GQ -o {output} && tabix -p vcf {output}"
 
 rule write_pops_file:
-    output: "pops.txt"
+    output: "vcf/pops.txt"
     run:
         lines = "\n".join([f"{s}\tpop1" for s in SAMPLES])
         with open(output[0], "w") as f:
@@ -83,11 +93,13 @@ rule write_pops_file:
 
 rule pixy:
     input:
-        vcf = "vars.vcf.gz",
-        pops = "pops.txt"
+        vcf = "vcf/vars.vcf.gz",
+        pops = "vcf/pops.txt"
     params:
         windows=1000
     output:
         "pixy_pi.txt"
+    conda: "envs/pixy.yaml"
+    shadow: "minimal"
     shell:
         "pixy --stats pi --vcf {input.vcf} --window_size {params.windows} --populations {input.pops}"

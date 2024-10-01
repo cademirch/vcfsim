@@ -23,11 +23,14 @@ def generate_windows(sequence_length, window_size):
 
 
 def simulate(seqlen, ne, mu, sample_size, seed, outdir, windows):
-
     ts = msprime.sim_ancestry(
-        sample_size, sequence_length=seqlen, random_seed=seed, population_size=ne
+        sample_size,
+        sequence_length=seqlen,
+        random_seed=seed,
+        population_size=ne,
+        ploidy=2,
     )
-    mts = msprime.sim_mutations(ts, rate=mu, random_seed=seed)
+    mts = msprime.sim_mutations(ts, rate=mu, random_seed=seed, discrete_genome=True)
     reference_sequence = tskit.random_nucleotides(seqlen, seed=seed)
     num_mutations = mts.num_mutations
 
@@ -35,17 +38,14 @@ def simulate(seqlen, ne, mu, sample_size, seed, outdir, windows):
 
     Path(outdir, "ref.fa").write_text(ref_fasta_entry)
 
-    alignments = mts.alignments(reference_sequence=reference_sequence)
-
-    with open(Path(outdir, "sim.vcf"), "w") as f:
-        mts.write_vcf(f, position_transform=lambda x: np.fmax(1, x))
-
-    for i, (hap1, hap2) in enumerate(zip(alignments, alignments)):
-        fp = Path(outdir, f"sample_{i}.fa")
-        fasta_entry = "\n".join([">hap1", hap1, ">hap2", hap2])
-        fp.write_text(fasta_entry)
+    for i in range(sample_size):
+        with open(Path(outdir, f"sample_{i}.vcf"), "w") as f:
+            mts.write_vcf(f, position_transform=lambda x: np.fmax(1, x), individuals=[i], contig_id="chr1")
+    with open(Path(outdir, "all.vcf"), "w") as f:
+        mts.write_vcf(f, position_transform=lambda x: np.fmax(1, x), contig_id="chr1")
+    pi = mts.pairwise_diversity() / seqlen
     Path(outdir, "sim_results.txt").write_text(
-        f"{seqlen=}, {ne=}, {mu=}, {sample_size=}, {seed=}, {num_mutations=}"
+        f"{seqlen=}, {ne=}, {mu=}, {sample_size=}, {seed=}, {num_mutations=}, {pi=}"
     )
     if windows:
         pi_windows = mts.diversity(windows=windows)
@@ -61,7 +61,7 @@ def main():
         ne = snakemake.params["ne"]  # noqa: F821
         mu = snakemake.params["mu"]  # noqa: F821
         sample_size = snakemake.params["sample_size"]  # noqa: F821
-        seed = snakemake.params["seed"]  # noqa: F821
+        seed = int(snakemake.params["seed"])  # noqa: F821
         outdir = snakemake.params["outdir"]  # noqa: F821
         seqlen = snakemake.params["seqlen"]  # noqa: F821
 
