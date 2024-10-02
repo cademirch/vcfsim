@@ -1,4 +1,5 @@
 MASON_BIN = "mason2-2.0.9-Linux-x86_64/bin/mason_simulator"
+MOPRS = "mop-rs/target/release/moprs"
 SAMPLES = [f"sample_{i}" for i in range(20)]
 SEQLEN = 10000
 COVERAGE = 60
@@ -6,10 +7,16 @@ NUM_READS = (SEQLEN * COVERAGE) // 300
 SEED = 1234
 NE=1e6
 MU=1e-8
+MIN_DEPTH = 10
+MAX_DEPTH = 10000000
+MIN_DEPTH_MEAN = 5
+MIN_PROPORTION = 0.5
+MOPRS_THREADS = 4
 
 rule all:
     input:
-        "pixy_pi.txt"
+        "pixy_pi.txt",
+        "callable_sites/moprs.bed"
 
 rule simulate:
     output:
@@ -70,9 +77,54 @@ rule bwa:
     params:
         rg = r"'@RG\tID:{sample}\tSM:{sample}\tLB:{sample}\tPL:ILLUMINA'"
     output:
-        temp("bams/{sample}.bam")
+        bam=temp("bams/{sample}.bam"),
+        bai=temp("bams/{sample}.bam.bai")
     shell:
-        "bwa mem -R {params.rg} {input.ref} {input.r1} {input.r2} | samtools sort - | samtools view -b > {output}"
+        "bwa mem -R {params.rg} {input.ref} {input.r1} {input.r2} | samtools sort - | samtools view -b > {output.bam} && samtools index {output.bam}"
+
+rule mosdepth:
+    input:
+        bam = "bams/{sample}.bam",
+        index = "bams/{sample}.bam.bai"
+    output:
+        "depths/{sample}.per-base.d4"
+    params:
+        prefix=lambda wc, output: output[0].replace(".per-base.d4", ""),
+    shadow: "minimal"
+    shell:
+        """
+        mosdepth --d4 {params.prefix} {input.bam}
+        """
+rule merge_d4:
+    input:
+        expand("depths/{sample}.per-base.d4", sample=SAMPLES)
+    output:
+        "d4/merged.d4"
+     
+    shell:
+        """
+        d4tools merge {input} {output}
+        """
+
+rule moprs:
+    input:
+        moprs_binary = MOPRS,
+        d4 = "d4/merged.d4"
+    output:
+        "callable_sites/moprs.bed"
+    params:
+        min_depth = f"-m {MIN_DEPTH}",
+        max_depth = f"-M {MAX_DEPTH}",
+        min_mean_depth = f"-u {MIN_DEPTH_MEAN}",
+        proportion = f"-d {MIN_PROPORTION}"
+    threads: MOPRS_THREADS
+    log: "logs/moprs.txt"
+    benchmark:
+        "benchmarks/moprs.txt"
+    shell:
+        """
+        RUST_LOG=trace {input.moprs_binary} {params} -c -t {threads} --d4 {input.d4} > {output} 2> {log}
+        """
 
 
 rule bcftools:
@@ -80,9 +132,21 @@ rule bcftools:
         ref = "sim/ref.fa",
         bams = expand("bams/{sample}.bam", sample=SAMPLES)
     output:
-        "vcf/vars.vcf.gz"
+        vcf="vcf/vars.vcf.gz",
+        tbi="vcf/vars.vcf.gz.tbi"
     shell:
-        "bcftools mpileup -f {input.ref} {input.bams} | bcftools call -m -Oz -f GQ -o {output} && tabix -p vcf {output}"
+        "(bcftools mpileup -f {input.ref} {input.bams} | bcftools call -m -f GQ | bgzip -c > {output.vcf}) && tabix -p vcf {output.vcf}"
+
+rule bcftools_vars_only:
+    input:
+        vcf="vcf/vars.vcf.gz",
+        tbi="vcf/vars.vcf.gz.tbi"
+    output:
+        vcf="vcf/only_vars.vcf.gz",
+        tbi="vcf/only_vars.vcf.gz.tbi"
+    shell:
+        "(bcftools view -v snps {input.vcf} | bgzip -c > {output.vcf}) && tabix -p vcf {output.vcf}"
+
 
 rule write_pops_file:
     output: "vcf/pops.txt"
@@ -94,6 +158,7 @@ rule write_pops_file:
 rule pixy:
     input:
         vcf = "vcf/vars.vcf.gz",
+        tbi="vcf/vars.vcf.gz.tbi",
         pops = "vcf/pops.txt"
     params:
         windows=1000
