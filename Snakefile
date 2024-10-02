@@ -24,6 +24,8 @@ rule simulate:
         "sim/sim_results.txt",
         "sim/pi_windows.txt",
         "sim/ref.fa"
+    conda:
+        "envs/env.yaml"
     params:
         ne = NE,
         mu = MU,
@@ -40,6 +42,8 @@ rule bwa_index:
         "sim/ref.fa"
     output:
         "sim/ref.fa.bwt"
+    conda:
+        "envs/env.yaml"
     shell:
         "bwa index {input}"
 
@@ -76,6 +80,8 @@ rule bwa:
         r2= "reads/{sample}_R2.fq"
     params:
         rg = r"'@RG\tID:{sample}\tSM:{sample}\tLB:{sample}\tPL:ILLUMINA'"
+    conda:
+        "envs/env.yaml"
     output:
         bam=temp("bams/{sample}.bam"),
         bai=temp("bams/{sample}.bam.bai")
@@ -90,6 +96,8 @@ rule mosdepth:
         "depths/{sample}.per-base.d4"
     params:
         prefix=lambda wc, output: output[0].replace(".per-base.d4", ""),
+    conda:
+        "envs/mosdepth.yaml"
     shadow: "minimal"
     shell:
         """
@@ -100,7 +108,8 @@ rule merge_d4:
         expand("depths/{sample}.per-base.d4", sample=SAMPLES)
     output:
         "d4/merged.d4"
-     
+    conda:
+        "envs/mosdepth.yaml"
     shell:
         """
         d4tools merge {input} {output}
@@ -134,16 +143,38 @@ rule bcftools:
     output:
         vcf="vcf/vars.vcf.gz",
         tbi="vcf/vars.vcf.gz.tbi"
+    conda:
+        "envs/env.yaml"
     shell:
         "(bcftools mpileup -f {input.ref} {input.bams} | bcftools call -m -f GQ | bgzip -c > {output.vcf}) && tabix -p vcf {output.vcf}"
-
-rule bcftools_vars_only:
+rule vcftools_filter:
     input:
         vcf="vcf/vars.vcf.gz",
         tbi="vcf/vars.vcf.gz.tbi"
     output:
+        vcf="vcf/filtered_vars.allsites.vcf.gz",
+        tbi="vcf/filtered_vars.vcf.allsites.gz.tbi"
+    conda:
+        "envs/env.yaml"
+    shell:
+        """
+        (vcftools --gzvcf {input.vcf} \
+        --remove-indels \
+        --max-missing 0.8 \
+        --min-meanDP 20 \
+        --max-meanDP 500 \
+        --recode --stdout | bgzip -c > {output.vcf}) && tabix -p vcf {output.vcf}
+        """
+
+rule bcftools_vars_only:
+    input:
+        vcf="vcf/filtered_vars.allsites.vcf.gz",
+        tbi="vcf/filtered_vars.vcf.allsites.gz.tbi"
+    output:
         vcf="vcf/only_vars.vcf.gz",
         tbi="vcf/only_vars.vcf.gz.tbi"
+    conda:
+        "envs/env.yaml"
     shell:
         "(bcftools view -v snps {input.vcf} | bgzip -c > {output.vcf}) && tabix -p vcf {output.vcf}"
 
@@ -157,8 +188,8 @@ rule write_pops_file:
 
 rule pixy:
     input:
-        vcf = "vcf/vars.vcf.gz",
-        tbi="vcf/vars.vcf.gz.tbi",
+        vcf="vcf/filtered_vars.allsites.vcf.gz",
+        tbi="vcf/filtered_vars.vcf.allsites.gz.tbi"
         pops = "vcf/pops.txt"
     params:
         windows=1000
