@@ -189,7 +189,7 @@ rule write_pops_file:
 rule pixy:
     input:
         vcf="vcf/filtered_vars.allsites.vcf.gz",
-        tbi="vcf/filtered_vars.vcf.allsites.gz.tbi"
+        tbi="vcf/filtered_vars.vcf.allsites.gz.tbi",
         pops = "vcf/pops.txt"
     params:
         windows=1000
