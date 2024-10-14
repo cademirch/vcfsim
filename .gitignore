@@ -6,3 +6,12 @@ reads
 sim
 pops.txt
 vars*
+vcf
+benchmarks
+callable_sites
+d4
+depths
+logs
+test-d4
+out.log
+output/

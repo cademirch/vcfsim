@@ -1,23 +1,24 @@
-MASON_BIN = "mason2-2.0.9-Linux-x86_64/bin/mason_simulator"
-MOPRS = "mop-rs/target/release/moprs"
-SAMPLES = [f"sample_{i}" for i in range(20)]
-SEQLEN = 10000
-COVERAGE = 60
+MASON_BIN = "../mason2-2.0.9-Linux-x86_64/bin/mason_simulator"
+MOPRS = "../mop-rs/target/release/moprs"
+SAMPLES = [f"sample_{i}" for i in range(100)]
+SEQLEN = 10_000_000
+COVERAGE = 100
 NUM_READS = (SEQLEN * COVERAGE) // 300
 SEED = 1234
 NE=1e6
 MU=1e-8
 MIN_DEPTH = 10
 MAX_DEPTH = 10000000
-MIN_DEPTH_MEAN = 5
-MIN_PROPORTION = 0.5
+MIN_DEPTH_MEAN = 20
+MAX_DEPTH_MEAN = 500
+MAX_MISSING = 0.8
 MOPRS_THREADS = 4
 
 rule all:
     input:
         "pixy_pi.txt",
-        "callable_sites/moprs.bed"
-
+        "callable_sites/moprs.bed",
+        
 rule simulate:
     output:
         temp(expand("sim/{sample}.vcf", sample=SAMPLES)),
@@ -60,6 +61,9 @@ rule simulate_reads:
     output:
         r1 = temp("reads/{sample}_R1.fq"),
         r2 = temp("reads/{sample}_R2.fq")
+    log:
+        "logs/sim_reads/{sample}.txt"
+    threads: 6
     shell:
         """
         {input.mason} \
@@ -68,7 +72,8 @@ rule simulate_reads:
         -iv {input.vcf} \
         -n {params.num_reads} \
         --illumina-read-length 150 \
-        -o {output.r1} -or {output.r2}
+        --num-threads {threads} \
+        -o {output.r1} -or {output.r2} &> {log}
         """
         
 
@@ -82,11 +87,13 @@ rule bwa:
         rg = r"'@RG\tID:{sample}\tSM:{sample}\tLB:{sample}\tPL:ILLUMINA'"
     conda:
         "envs/env.yaml"
+    log:
+        "logs/bwa/{sample.txt}"
     output:
         bam=temp("bams/{sample}.bam"),
         bai=temp("bams/{sample}.bam.bai")
     shell:
-        "bwa mem -R {params.rg} {input.ref} {input.r1} {input.r2} | samtools sort - | samtools view -b > {output.bam} && samtools index {output.bam}"
+        "bwa mem -R {params.rg} {input.ref} {input.r1} {input.r2} 2> {log} | samtools sort - 2>> {log}| samtools view -b > {output.bam} 2>> {log} && samtools index {output.bam} 2>> {log}"
 
 rule mosdepth:
     input:
@@ -122,17 +129,16 @@ rule moprs:
     output:
         "callable_sites/moprs.bed"
     params:
-        min_depth = f"-m {MIN_DEPTH}",
-        max_depth = f"-M {MAX_DEPTH}",
         min_mean_depth = f"-u {MIN_DEPTH_MEAN}",
-        proportion = f"-d {MIN_PROPORTION}"
+        max_mean_depth = f"-U {MAX_DEPTH_MEAN}",
+        proportion = f"-d {1-MAX_MISSING}"
     threads: MOPRS_THREADS
     log: "logs/moprs.txt"
     benchmark:
         "benchmarks/moprs.txt"
     shell:
         """
-        RUST_LOG=trace {input.moprs_binary} {params} -c -t {threads} --d4 {input.d4} > {output} 2> {log}
+        {input.moprs_binary} {params} -c -t {threads} --d4 {input.d4} > {output} 2> {log}
         """
 
 
@@ -147,36 +153,74 @@ rule bcftools:
         "envs/env.yaml"
     shell:
         "(bcftools mpileup -f {input.ref} {input.bams} | bcftools call -m -f GQ | bgzip -c > {output.vcf}) && tabix -p vcf {output.vcf}"
+
+
+rule create_invar_only:
+    input:
+        vcf="vcf/vars.vcf.gz",
+        tbi="vcf/vars.vcf.gz.tbi"
+    output:
+        vcf="vcf/invars.vcf.gz",
+        tbi="vcf/invars.vcf.gz.tbi"
+    params:
+        min_mean_depth = MIN_DEPTH_MEAN,
+        max_mean_depth = MAX_DEPTH_MEAN,
+        max_missing = MAX_MISSING,
+    conda:
+        "envs/env.yaml"
+    shell:
+        """
+        (vcftools --gzvcf {input.vcf} \
+        --max-maf 0 \
+        --max-missing {params.max_missing} \
+        --min-meanDP {params.min_mean_depth} \
+        --max-meanDP {params.max_mean_depth} \
+        --recode --stdout | bgzip -c > {output.vcf}) && tabix -p vcf {output.vcf}
+        """
+
+    
 rule vcftools_filter:
     input:
         vcf="vcf/vars.vcf.gz",
         tbi="vcf/vars.vcf.gz.tbi"
     output:
-        vcf="vcf/filtered_vars.allsites.vcf.gz",
-        tbi="vcf/filtered_vars.vcf.allsites.gz.tbi"
+        vcf="vcf/filtered_vars.vcf.gz",
+        tbi="vcf/filtered_vars.vcf.gz.tbi"
+    params:
+        min_mean_depth = MIN_DEPTH_MEAN,
+        max_mean_depth = MAX_DEPTH_MEAN,
+        max_missing = MAX_MISSING,
     conda:
         "envs/env.yaml"
     shell:
         """
         (vcftools --gzvcf {input.vcf} \
         --remove-indels \
-        --max-missing 0.8 \
-        --min-meanDP 20 \
-        --max-meanDP 500 \
+        --max-missing {params.max_missing} \
+        --min-meanDP {params.min_mean_depth} \
+        --max-meanDP {params.max_mean_depth} \
         --recode --stdout | bgzip -c > {output.vcf}) && tabix -p vcf {output.vcf}
         """
 
-rule bcftools_vars_only:
+rule bcftools_concat:
     input:
-        vcf="vcf/filtered_vars.allsites.vcf.gz",
-        tbi="vcf/filtered_vars.vcf.allsites.gz.tbi"
+        varvcf="vcf/filtered_vars.vcf.gz",
+        vartbi="vcf/filtered_vars.vcf.gz.tbi",
+        invarvcf="vcf/invars.vcf.gz",
+        invartbi="vcf/invars.vcf.gz.tbi"
     output:
-        vcf="vcf/only_vars.vcf.gz",
-        tbi="vcf/only_vars.vcf.gz.tbi"
+        vcf="vcf/allsites_filtered.vcf.gz",
+        tbi="vcf/allsites_filtered.vcf.gz.tbi"
     conda:
         "envs/env.yaml"
     shell:
-        "(bcftools view -v snps {input.vcf} | bgzip -c > {output.vcf}) && tabix -p vcf {output.vcf}"
+        """
+        (bcftools concat \
+        --allow-overlaps \
+        {input.varvcf} {input.invarvcf} \
+        | bgzip -c {output.vcf}) && tabix -p vcf {output.vcf}
+        """
+
 
 
 rule write_pops_file:
@@ -188,8 +232,8 @@ rule write_pops_file:
 
 rule pixy:
     input:
-        vcf="vcf/filtered_vars.allsites.vcf.gz",
-        tbi="vcf/filtered_vars.vcf.allsites.gz.tbi",
+        vcf="vcf/allsites_filtered.vcf.gz",
+        tbi="vcf/allsites_filtered.vcf.gz.tbi",
         pops = "vcf/pops.txt"
     params:
         windows=1000

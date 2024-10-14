@@ -3,6 +3,8 @@ import tskit
 import argparse
 from pathlib import Path
 import numpy as np
+import concurrent.futures
+import datetime
 
 
 def generate_windows(sequence_length, window_size):
@@ -22,7 +24,19 @@ def generate_windows(sequence_length, window_size):
     return windows
 
 
+def write_vcf_for_sample(i, outdir, mts):
+    """Helper function to write a VCF for a single sample."""
+    with open(Path(outdir, f"sample_{i}.vcf"), "w") as f:
+        mts.write_vcf(
+            f,
+            position_transform=lambda x: np.fmax(1, x),
+            individuals=[i],
+            contig_id="chr1",
+        )
+
+
 def simulate(seqlen, ne, mu, sample_size, seed, outdir, windows):
+    # Simulate ancestry and mutations
     ts = msprime.sim_ancestry(
         sample_size,
         sequence_length=seqlen,
@@ -34,19 +48,31 @@ def simulate(seqlen, ne, mu, sample_size, seed, outdir, windows):
     reference_sequence = tskit.random_nucleotides(seqlen, seed=seed)
     num_mutations = mts.num_mutations
 
+    # Write the reference sequence to a FASTA file
     ref_fasta_entry = "\n".join([">chr1", reference_sequence])
-
     Path(outdir, "ref.fa").write_text(ref_fasta_entry)
 
-    for i in range(sample_size):
-        with open(Path(outdir, f"sample_{i}.vcf"), "w") as f:
-            mts.write_vcf(f, position_transform=lambda x: np.fmax(1, x), individuals=[i], contig_id="chr1")
+    # Parallelize writing individual sample VCFs using ProcessPoolExecutor
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        futures = [
+            executor.submit(write_vcf_for_sample, i, outdir, mts)
+            for i in range(sample_size)
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            future.result()  # Ensures any exceptions are raised
+
+    # Write the combined VCF for all samples
     with open(Path(outdir, "all.vcf"), "w") as f:
         mts.write_vcf(f, position_transform=lambda x: np.fmax(1, x), contig_id="chr1")
-    pi = mts.pairwise_diversity() / seqlen
+
+    # Calculate summary statistics
+    pi = mts.diversity()
+    theta = 4 * ne * mu
     Path(outdir, "sim_results.txt").write_text(
-        f"{seqlen=}, {ne=}, {mu=}, {sample_size=}, {seed=}, {num_mutations=}, {pi=}"
+        f"{seqlen=}, {ne=}, {mu=}, {sample_size=}, {seed=}, {num_mutations=}, {pi=}, {theta=}"
     )
+
+    # If windows are specified, calculate diversity per window and write to file
     if windows:
         pi_windows = mts.diversity(windows=windows)
         Path(outdir, "pi_windows.txt").write_text(
