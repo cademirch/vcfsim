@@ -35,7 +35,7 @@ def write_vcf_for_sample(i, outdir, mts):
         )
 
 
-def simulate(seqlen, ne, mu, sample_size, seed, outdir, windows):
+def simulate(seqlen, ne, mu, sample_size, seed, outdir, windows, max_workers):
     # Simulate ancestry and mutations
     ts = msprime.sim_ancestry(
         sample_size,
@@ -53,7 +53,7 @@ def simulate(seqlen, ne, mu, sample_size, seed, outdir, windows):
     Path(outdir, "ref.fa").write_text(ref_fasta_entry)
 
     # Parallelize writing individual sample VCFs using ProcessPoolExecutor
-    with concurrent.futures.ProcessPoolExecutor() as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(write_vcf_for_sample, i, outdir, mts)
             for i in range(sample_size)
@@ -92,6 +92,7 @@ def main():
         seqlen = snakemake.params["seqlen"]  # noqa: F821
 
         windows = snakemake.params.get("windows", None)
+        max_workers = snakemake.threads
 
     except ImportError:
         parser = argparse.ArgumentParser()
@@ -111,6 +112,7 @@ def main():
         parser.add_argument(
             "--windows", type=int, help="bp size of windows", required=False
         )
+        parser.add_argument("--threads", type=int, help="num threads", required=True)
 
         args = parser.parse_args()
 
@@ -121,11 +123,12 @@ def main():
         sample_size = args.sample_size
         seed = args.seed
         windows = args.windows
+        max_workers = args.threads
 
     if windows is not None:
         windows = generate_windows(seqlen, windows)
 
-    simulate(seqlen, ne, mu, sample_size, seed, outdir, windows)
+    simulate(seqlen, ne, mu, sample_size, seed, outdir, windows, max_workers)
 
 
 if __name__ == "__main__":

@@ -1,23 +1,37 @@
-MASON_BIN = "../mason2-2.0.9-Linux-x86_64/bin/mason_simulator"
-MOPRS = "../mop-rs/target/release/moprs"
-SAMPLES = [f"sample_{i}" for i in range(100)]
-SEQLEN = 10_000_000
-COVERAGE = 100
+from pathlib import Path
+import random
+
+MASON_BIN = Path(workflow.basedir, "mason2-2.0.9-Linux-x86_64/bin/mason_simulator")
+CLAM = Path(workflow.basedir, "clam/target/release/clam")
+SAMPLES = [f"sample_{i}" for i in range(10)]
+SEQLEN = 10_000
+COVERAGE = 10
 NUM_READS = (SEQLEN * COVERAGE) // 300
 SEED = 1234
 NE=1e6
 MU=1e-8
-MIN_DEPTH = 10
-MAX_DEPTH = 10000000
-MIN_DEPTH_MEAN = 20
-MAX_DEPTH_MEAN = 500
+CLAM_LOCI_MIN_DEPTH = 5
+CLAM_LOCI_MAX_DEPTH = 20
+# MIN_DEPTH = 5
+# MAX_DEPTH = 500
+# MIN_DEPTH_MEAN = 5
+# MAX_DEPTH_MEAN = 1000
 MAX_MISSING = 0.8
-MOPRS_THREADS = 4
+CLAM_LOCI_THREADS = 4
+
+
+def read_seed(wc):
+    sample_number = int(wc.sample.split("_")[1])
+    return SEED + sample_number
+
 
 rule all:
     input:
-        "pixy_pi.txt",
-        "callable_sites/moprs.bed",
+        "clam_loci/callable_sites.d4",
+        "clam_loci_bgzf/callable_sites.d4",
+        "vcf/vars.vcf.gz",
+        "vcf/allsites_filtered.vcf.gz",
+        "pixy_pi.txt"
         
 rule simulate:
     output:
@@ -27,6 +41,7 @@ rule simulate:
         "sim/ref.fa"
     conda:
         "envs/env.yaml"
+    threads: 20
     params:
         ne = NE,
         mu = MU,
@@ -42,7 +57,7 @@ rule bwa_index:
     input:
         "sim/ref.fa"
     output:
-        "sim/ref.fa.bwt"
+        expand("sim/ref.fa.{index}", index=["bwt", "amb", "ann", "pac", "sa"])
     conda:
         "envs/env.yaml"
     shell:
@@ -56,7 +71,7 @@ rule simulate_reads:
         vcf = "sim/{sample}.vcf"
     params:
         num_reads = NUM_READS,
-        seed = SEED,
+        seed = read_seed,
         
     output:
         r1 = temp("reads/{sample}_R1.fq"),
@@ -88,12 +103,14 @@ rule bwa:
     conda:
         "envs/env.yaml"
     log:
-        "logs/bwa/{sample.txt}"
+        "logs/bwa/{sample}.txt"
+    threads: 16
     output:
-        bam=temp("bams/{sample}.bam"),
-        bai=temp("bams/{sample}.bam.bai")
+        bam="bams/{sample}.bam",
+        bai="bams/{sample}.bam.bai"
+    shadow: "minimal"
     shell:
-        "bwa mem -R {params.rg} {input.ref} {input.r1} {input.r2} 2> {log} | samtools sort - 2>> {log}| samtools view -b > {output.bam} 2>> {log} && samtools index {output.bam} 2>> {log}"
+        "bwa mem -t {threads} -R {params.rg} {input.ref} {input.r1} {input.r2} 2> {log} | samtools sort - 2>> {log}| samtools view -b > {output.bam} 2>> {log} && samtools index {output.bam} 2>> {log}"
 
 rule mosdepth:
     input:
@@ -117,30 +134,60 @@ rule merge_d4:
         "d4/merged.d4"
     conda:
         "envs/mosdepth.yaml"
+    benchmark:
+        "benchmarks/merge_d4/benchmark.txt"
     shell:
         """
         d4tools merge {input} {output}
         """
-
-rule moprs:
+rule bgzip_d4:
     input:
-        moprs_binary = MOPRS,
-        d4 = "d4/merged.d4"
+        "d4/merged.d4"
     output:
-        "callable_sites/moprs.bed"
-    params:
-        min_mean_depth = f"-u {MIN_DEPTH_MEAN}",
-        max_mean_depth = f"-U {MAX_DEPTH_MEAN}",
-        proportion = f"-d {1-MAX_MISSING}"
-    threads: MOPRS_THREADS
-    log: "logs/moprs.txt"
+        gz= "d4/merged.d4.gz",
+        gzi = "d4/merged.d4.gz.gzi"
+    conda:
+        "envs/env.yaml"
     benchmark:
-        "benchmarks/moprs.txt"
+        "benchmarks/bgzip_d4/benchmark.txt"
     shell:
         """
-        {input.moprs_binary} {params} -c -t {threads} --d4 {input.d4} > {output} 2> {log}
+        bgzip -c --binary {input} > {output.gz} && bgzip --reindex {output.gz}
         """
-
+rule clam_loci:
+    input:
+        clam_binary = CLAM,
+        d4 = "d4/merged.d4"
+    output:
+        "clam_loci/callable_sites.d4"
+    params:
+        depth = f"-m {CLAM_LOCI_MIN_DEPTH} -M {CLAM_LOCI_MAX_DEPTH}",
+        prefix = "clam_loci/callable_sites"
+    threads: CLAM_LOCI_THREADS
+    log: "logs/clam_loci/log.txt"
+    benchmark:
+        "benchmarks/clam_loci/benchmark.txt"
+    shell:
+        """
+        {input.clam_binary} loci {params.depth} -t {threads} {input.d4} {params.prefix} 2> {log}
+        """
+rule clam_loci_bgzf:
+    input:
+        clam_binary = CLAM,
+        d4 = "d4/merged.d4.gz"
+    output:
+        "clam_loci_bgzf/callable_sites.d4"
+    params:
+        depth = f"-m {CLAM_LOCI_MIN_DEPTH} -M {CLAM_LOCI_MAX_DEPTH}",
+        prefix = "clam_loci_bgzf/callable_sites"
+    threads: CLAM_LOCI_THREADS
+    log: "logs/clam_loci_bgzf/log.txt"
+    benchmark:
+        "benchmarks/clam_loci_bgzf/benchmark.txt"
+    shell:
+        """
+        {input.clam_binary} loci {params.depth} -t {threads} {input.d4} {params.prefix} 2> {log}
+        """
 
 rule bcftools:
     input:
@@ -152,7 +199,7 @@ rule bcftools:
     conda:
         "envs/env.yaml"
     shell:
-        "(bcftools mpileup -f {input.ref} {input.bams} | bcftools call -m -f GQ | bgzip -c > {output.vcf}) && tabix -p vcf {output.vcf}"
+        "(bcftools mpileup -f {input.ref} {input.bams} | bcftools call -m -f GQ -a FORMAT/DP | bgzip -c > {output.vcf}) && tabix -p vcf {output.vcf}"
 
 
 rule create_invar_only:
@@ -163,8 +210,8 @@ rule create_invar_only:
         vcf="vcf/invars.vcf.gz",
         tbi="vcf/invars.vcf.gz.tbi"
     params:
-        min_mean_depth = MIN_DEPTH_MEAN,
-        max_mean_depth = MAX_DEPTH_MEAN,
+        min_mean_depth = CLAM_LOCI_MIN_DEPTH,
+        max_mean_depth = CLAM_LOCI_MAX_DEPTH,
         max_missing = MAX_MISSING,
     conda:
         "envs/env.yaml"
@@ -172,7 +219,6 @@ rule create_invar_only:
         """
         (vcftools --gzvcf {input.vcf} \
         --max-maf 0 \
-        --max-missing {params.max_missing} \
         --min-meanDP {params.min_mean_depth} \
         --max-meanDP {params.max_mean_depth} \
         --recode --stdout | bgzip -c > {output.vcf}) && tabix -p vcf {output.vcf}
@@ -187,8 +233,8 @@ rule vcftools_filter:
         vcf="vcf/filtered_vars.vcf.gz",
         tbi="vcf/filtered_vars.vcf.gz.tbi"
     params:
-        min_mean_depth = MIN_DEPTH_MEAN,
-        max_mean_depth = MAX_DEPTH_MEAN,
+        min_mean_depth = CLAM_LOCI_MIN_DEPTH,
+        max_mean_depth = CLAM_LOCI_MAX_DEPTH,
         max_missing = MAX_MISSING,
     conda:
         "envs/env.yaml"
@@ -196,7 +242,6 @@ rule vcftools_filter:
         """
         (vcftools --gzvcf {input.vcf} \
         --remove-indels \
-        --max-missing {params.max_missing} \
         --min-meanDP {params.min_mean_depth} \
         --max-meanDP {params.max_mean_depth} \
         --recode --stdout | bgzip -c > {output.vcf}) && tabix -p vcf {output.vcf}
@@ -215,11 +260,10 @@ rule bcftools_concat:
         "envs/env.yaml"
     shell:
         """
-        (bcftools concat \
-        --allow-overlaps \
-        {input.varvcf} {input.invarvcf} \
-        | bgzip -c {output.vcf}) && tabix -p vcf {output.vcf}
+        bcftools concat -Ov --allow-overlaps {input.varvcf} {input.invarvcf} | bgzip -c > {output.vcf}
+        tabix -p vcf {output.vcf}
         """
+
 
 
 
