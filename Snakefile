@@ -3,6 +3,7 @@ import random
 
 MASON_BIN = Path(workflow.basedir, "mason2-2.0.9-Linux-x86_64/bin/mason_simulator")
 CLAM = Path(workflow.basedir, "clam/target/release/clam")
+MOSDEPTH = Path(workflow.basedir, "mosdepth_d4")
 SAMPLES = [f"sample_{i}" for i in range(10)]
 SEQLEN = 10_000
 COVERAGE = 10
@@ -18,6 +19,7 @@ CLAM_LOCI_MAX_DEPTH = 20
 # MAX_DEPTH_MEAN = 1000
 MAX_MISSING = 0.8
 CLAM_LOCI_THREADS = 4
+CLAM_STAT_THREADS = 4
 
 
 def read_seed(wc):
@@ -27,11 +29,9 @@ def read_seed(wc):
 
 rule all:
     input:
-        "clam_loci/callable_sites.d4",
-        "clam_loci_bgzf/callable_sites.d4",
-        "vcf/vars.vcf.gz",
-        "vcf/allsites_filtered.vcf.gz",
-        "pixy_pi.txt"
+        "pixy_pi.txt",
+        "clam_pi.tsv",
+        
         
 rule simulate:
     output:
@@ -114,18 +114,17 @@ rule bwa:
 
 rule mosdepth:
     input:
+        exe = MOSDEPTH,
         bam = "bams/{sample}.bam",
         index = "bams/{sample}.bam.bai"
     output:
         "depths/{sample}.per-base.d4"
     params:
         prefix=lambda wc, output: output[0].replace(".per-base.d4", ""),
-    conda:
-        "envs/mosdepth.yaml"
     shadow: "minimal"
     shell:
         """
-        mosdepth --d4 {params.prefix} {input.bam}
+        {input.exe} --d4 {params.prefix} {input.bam}
         """
 rule merge_d4:
     input:
@@ -154,6 +153,46 @@ rule bgzip_d4:
         """
         bgzip -c --binary {input} > {output.gz} && bgzip --reindex {output.gz}
         """
+
+rule clam_stat_bgzf:
+    input:
+        clam_binary = CLAM,
+        vcf="vcf/filtered_vars.vcf.gz",
+        tbi="vcf/filtered_vars.vcf.gz.tbi",
+        callable_sites= "clam_loci_bgzf/callable_sites.d4"
+    output:
+        pi="clam_pi.tsv",
+    params:
+        outdir="clam_stat_bgzf",
+    log: "logs/clam_stat_bgzf/log.txt"
+    benchmark:
+        "benchmarks/clam_stat_bgzf/benchmark.txt"
+    threads: CLAM_STAT_THREADS
+    shell:
+        """
+        {input.clam_binary} stat -t {threads} -w 1000 {input.vcf} {input.callable_sites}
+        """
+
+# rule clam_stat:
+#     input:
+#         clam_binary = CLAM,
+#         vcf="vcf/filtered_vars.vcf.gz",
+#         tbi="vcf/filtered_vars.vcf.gz.tbi",
+#         callable_sites= "clam_loci/callable_sites.d4"
+#     output:
+#         pi="clam_stat/clam_pi.tsv",
+#     params:
+#         outdir="clam_stat",
+#     log: "logs/clam_stat/log.txt"
+#     benchmark:
+#         "benchmarks/clam_stat/benchmark.txt"
+#     threads: CLAM_STAT_THREADS
+#     shell:
+#         """
+#         mkdir -p {params.outdir}
+#         {input.clam_binary} stat -t {threads} -o {params.outdir} -w 1000 {input.vcf} {input.callable_sites}
+#         """
+
 rule clam_loci:
     input:
         clam_binary = CLAM,
@@ -199,9 +238,11 @@ rule bcftools:
     conda:
         "envs/env.yaml"
     shell:
-        "(bcftools mpileup -f {input.ref} {input.bams} | bcftools call -m -f GQ -a FORMAT/DP | bgzip -c > {output.vcf}) && tabix -p vcf {output.vcf}"
-
-
+        """
+        bcftools mpileup -f {input.ref} --annotate FORMAT/DP {input.bams} | \
+        bcftools call -m -Oz -o {output.vcf}
+        tabix -p vcf {output.vcf}
+        """
 rule create_invar_only:
     input:
         vcf="vcf/vars.vcf.gz",
@@ -244,6 +285,7 @@ rule vcftools_filter:
         --remove-indels \
         --min-meanDP {params.min_mean_depth} \
         --max-meanDP {params.max_mean_depth} \
+        --non-ref-ac-any 1 \
         --recode --stdout | bgzip -c > {output.vcf}) && tabix -p vcf {output.vcf}
         """
 
@@ -260,7 +302,7 @@ rule bcftools_concat:
         "envs/env.yaml"
     shell:
         """
-        bcftools concat -Ov --allow-overlaps {input.varvcf} {input.invarvcf} | bgzip -c > {output.vcf}
+        bcftools concat -Ov -a -D {input.varvcf} {input.invarvcf} | bgzip -c > {output.vcf}
         tabix -p vcf {output.vcf}
         """
 
