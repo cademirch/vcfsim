@@ -24,9 +24,11 @@ CLAM_STAT_THREADS = 4
 
 def read_seed(wc):
     sample_number = int(wc.sample.split("_")[1])
-    return SEED + sample_number
+    return SEED + sample_number + random.randint((0,10000))
 
-
+def sim_seed(wc):
+    return SEED + random.randint((0,10000))
+    
 rule all:
     input:
         "pixy_pi.txt",
@@ -46,7 +48,7 @@ rule simulate:
         ne = NE,
         mu = MU,
         sample_size = len(SAMPLES),
-        seed = SEED,
+        seed = sim_seed,
         outdir = "sim",
         seqlen = SEQLEN,
         windows=1000
