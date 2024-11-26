@@ -8,15 +8,12 @@ SAMPLES = [f"sample_{i}" for i in range(10)]
 SEQLEN = 10_000
 COVERAGE = 10
 NUM_READS = (SEQLEN * COVERAGE) // 300
-SEED = 1234
+SEED = int(config.get("seed", 1234))
+logger.warning(f"seed = {SEED}")
 NE=1e6
 MU=1e-8
 CLAM_LOCI_MIN_DEPTH = 5
 CLAM_LOCI_MAX_DEPTH = 20
-# MIN_DEPTH = 5
-# MAX_DEPTH = 500
-# MIN_DEPTH_MEAN = 5
-# MAX_DEPTH_MEAN = 1000
 MAX_MISSING = 0.8
 CLAM_LOCI_THREADS = 4
 CLAM_STAT_THREADS = 4
@@ -24,31 +21,30 @@ CLAM_STAT_THREADS = 4
 
 def read_seed(wc):
     sample_number = int(wc.sample.split("_")[1])
-    return SEED + sample_number + random.randint((0,10000))
+    return SEED + sample_number
 
-def sim_seed(wc):
-    return SEED + random.randint((0,10000))
-    
+
+
 rule all:
     input:
         "pixy_pi.txt",
         "clam_pi.tsv",
-        
+        "msprime_pi_windows.tsv",
         
 rule simulate:
     output:
         temp(expand("sim/{sample}.vcf", sample=SAMPLES)),
         "sim/sim_results.txt",
-        "sim/pi_windows.txt",
+        "msprime_pi_windows.tsv",
         "sim/ref.fa"
     conda:
         "envs/env.yaml"
-    threads: 20
+    threads: 4
     params:
         ne = NE,
         mu = MU,
         sample_size = len(SAMPLES),
-        seed = sim_seed,
+        seed = SEED,
         outdir = "sim",
         seqlen = SEQLEN,
         windows=1000
@@ -80,7 +76,7 @@ rule simulate_reads:
         r2 = temp("reads/{sample}_R2.fq")
     log:
         "logs/sim_reads/{sample}.txt"
-    threads: 6
+    threads: 4
     shell:
         """
         {input.mason} \
@@ -106,7 +102,7 @@ rule bwa:
         "envs/env.yaml"
     log:
         "logs/bwa/{sample}.txt"
-    threads: 16
+    threads: 4
     output:
         bam="bams/{sample}.bam",
         bai="bams/{sample}.bam.bai"

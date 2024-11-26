@@ -7,6 +7,7 @@ import concurrent.futures
 import datetime
 
 
+
 def generate_windows(sequence_length, window_size):
     """
     Generate a list of window boundaries for a sequence of given length and window size.
@@ -75,11 +76,22 @@ def simulate(seqlen, ne, mu, sample_size, seed, outdir, windows, max_workers):
     # If windows are specified, calculate diversity per window and write to file
     if windows:
         pi_windows = mts.diversity(windows=windows)
-        Path(outdir, "pi_windows.txt").write_text(
-            "\n".join([str(windows), str(pi_windows)])
+        outfile = "msprime_pi_windows.tsv"
+        start_positions = windows[:-1]
+        end_positions = [pos - 1 for pos in windows[1:]]
+        chrom = ["chr1"] * (len(windows) - 1)
+        lines = "\n".join(
+            [
+                f"{chrom}\t{start}\t{end}\t{pi}"
+                for chrom, start, end, pi in zip(
+                    chrom, start_positions, end_positions, pi_windows
+                )
+            ]
         )
 
-
+        with open(outfile, "w") as f:
+            f.write("chrom,start,end,pi\n")
+            f.writelines(lines)
 def main():
     try:
         from snakemake.script import snakemake
