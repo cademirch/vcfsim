@@ -171,26 +171,6 @@ rule clam_stat_bgzf:
         {input.clam_binary} stat -t {threads} -w 1000 {input.vcf} {input.callable_sites}
         """
 
-# rule clam_stat:
-#     input:
-#         clam_binary = CLAM,
-#         vcf="vcf/filtered_vars.vcf.gz",
-#         tbi="vcf/filtered_vars.vcf.gz.tbi",
-#         callable_sites= "clam_loci/callable_sites.d4"
-#     output:
-#         pi="clam_stat/clam_pi.tsv",
-#     params:
-#         outdir="clam_stat",
-#     log: "logs/clam_stat/log.txt"
-#     benchmark:
-#         "benchmarks/clam_stat/benchmark.txt"
-#     threads: CLAM_STAT_THREADS
-#     shell:
-#         """
-#         mkdir -p {params.outdir}
-#         {input.clam_binary} stat -t {threads} -o {params.outdir} -w 1000 {input.vcf} {input.callable_sites}
-#         """
-
 rule clam_loci:
     input:
         clam_binary = CLAM,

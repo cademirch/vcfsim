@@ -17,7 +17,7 @@ def add_invariant_sites(variants_vcf, reference_fasta, output_vcf):
         last_pos = 0
 
         # Iterate over the variant VCF records and add invariant sites between variants
-        for rec in vcf_in.fetch(chrom):
+        for rec in vcf_in:
             # Add invariant sites between last variant and current variant
             if rec.pos > last_pos + 1:
                 for pos in range(last_pos + 1, rec.pos):
@@ -63,13 +63,24 @@ def create_invariant_record(header, chrom, pos, ref_base, samples):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Add invariant sites to a variant-only VCF."
-    )
-    parser.add_argument("variants_vcf", help="Input variant-only VCF file")
-    parser.add_argument("reference_fasta", help="Reference FASTA file")
-    parser.add_argument("output_vcf", help="Output VCF file with invariant sites")
+    try:
+        from snakemake.script import snakemake
 
-    args = parser.parse_args()
+        variants_vcf = snakemake.input["vcf"]
+        reference_fasta = snakemake.input["ref"]
+        output_vcf = snakemake.output["vcf"]
 
-    add_invariant_sites(args.variants_vcf, args.reference_fasta, args.output_vcf)
+    except ImportError:
+        parser = argparse.ArgumentParser(
+            description="Add invariant sites to a variant-only VCF."
+        )
+        parser.add_argument("variants_vcf", help="Input variant-only VCF file")
+        parser.add_argument("reference_fasta", help="Reference FASTA file")
+        parser.add_argument("output_vcf", help="Output VCF file with invariant sites")
+
+        args = parser.parse_args()
+        variants_vcf = args.variants_vcf
+        reference_fasta = args.reference_fasta
+        output_vcf = args.output_vcf
+
+    add_invariant_sites(variants_vcf, reference_fasta, output_vcf)

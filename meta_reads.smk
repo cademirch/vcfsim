@@ -79,6 +79,8 @@ rule run:
         prime =temp("intermediate/{i}/msprime_pi_windows.tsv")
     params:
         conda_prefix = CONDA_PREFIX
+    conda:
+        "snakemake"
     threads: THREADS_PER_RUN
     log: "logs/meta/{i}.log"
     shadow: "minimal"
