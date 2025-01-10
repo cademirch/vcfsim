@@ -1,5 +1,6 @@
 import argparse
 import pysam
+from pathlib import Path
 
 
 def add_invariant_sites(variants_vcf, reference_fasta, output_vcf):
@@ -45,6 +46,13 @@ def add_invariant_sites(variants_vcf, reference_fasta, output_vcf):
     vcf_in.close()
     ref_fasta.close()
     vcf_out.close()
+    all_vcf_path = Path(output_vcf)
+    pysam.tabix_compress(
+        all_vcf_path, all_vcf_path.with_suffix(all_vcf_path.suffix + ".gz")
+    )
+    pysam.tabix_index(
+        str(all_vcf_path.with_suffix(all_vcf_path.suffix + ".gz")), preset="vcf"
+    )
 
 
 def create_invariant_record(header, chrom, pos, ref_base, samples):

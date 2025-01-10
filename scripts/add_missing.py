@@ -2,9 +2,10 @@ import random
 import argparse
 import gzip
 from pathlib import Path
+from multiprocessing import Process
+import numpy as np
 
 
-# Function to parse VCF files
 def parse_vcf(input_vcf):
     with (
         gzip.open(input_vcf, "rt")
@@ -38,7 +39,7 @@ def create_bedgraph(body, bedgraph_file):
             pos = int(row[1])
             genotypes = row[9:]
             non_missing_count = sum(1 for gt in genotypes if gt != ".|.")
-            bed.write(f"{chrom}\t{pos-1}\t{pos}\t{non_missing_count}\n")
+            bed.write(f"{chrom}\t{pos - 1}\t{pos}\t{non_missing_count}\n")
     with open(
         Path(
             Path(bedgraph_file).parents[0],
@@ -49,77 +50,110 @@ def create_bedgraph(body, bedgraph_file):
         f.write(f"{chrom}\t{pos}")
 
 
-# Function to randomly modify VCF
-def modify_vcf(body, prop_missing_sites, prop_missing_genotypes):
-    modified_body = []
+# Function to modify genotypes in VCF
+def modify_genotypes(body, prop_missing_genotypes):
+    rows = len(body)
+    cols = len(body[0][9:])  # Assuming genotype data starts at index 9
+    n_genotypes = rows * cols
+    n_missing = int(prop_missing_genotypes * n_genotypes)
 
-    for row in body:
-        if random.random() < prop_missing_sites:
-            continue  # Skip the site entirely
+    # Create a mask with `n_missing` True values (missing data)
+    mask = np.array([True] * n_missing + [False] * (n_genotypes - n_missing))
+    np.random.shuffle(mask)
 
+    # Apply mask across the entire matrix
+    mask = mask.reshape(rows, cols)
+    for i, row in enumerate(body):
         genotypes = row[9:]
-        for i in range(len(genotypes)):
-            if random.random() < prop_missing_genotypes:
-                genotypes[i] = ".|."
-
+        for j in range(len(genotypes)):
+            if mask[i, j]:
+                genotypes[j] = ".|."
         row[9:] = genotypes
-        modified_body.append(row)
+
+    return body
+
+
+def modify_sites(body, prop_missing_sites):
+    """
+    Removes a proportion of sites (rows) from the VCF body using NumPy.
+
+    Args:
+        body (list): The VCF file contents split into lines, with header lines excluded.
+        prop_missing_sites (float): Proportion of sites to remove (between 0 and 1).
+
+    Returns:
+        list: Modified VCF body with the specified proportion of rows removed.
+    """
+    # Convert body to NumPy array for efficient indexing
+    body_array = np.array(body)
+
+    # Calculate the number of rows to remove
+    num_missing_sites = int(len(body) * prop_missing_sites)
+
+    # Randomly select indices to remove
+    indices_to_remove = np.random.choice(len(body), num_missing_sites, replace=False)
+
+    # Create a mask for rows to keep
+    mask = np.ones(len(body), dtype=bool)
+    mask[indices_to_remove] = False
+
+    # Apply mask to retain only the rows not selected for removal
+    modified_body = body_array[mask].tolist()
 
     return modified_body
 
 
+# Worker function for processing missing genotypes
+def process_genotypes(header, body, prop_missing_genotypes, output_vcf, bedgraph_file):
+    modified_body = modify_genotypes(body, prop_missing_genotypes)
+    write_vcf(header, modified_body, output_vcf)
+    create_bedgraph(modified_body, bedgraph_file)
+
+
+# Worker function for processing missing sites
+def process_sites(header, body, prop_missing_sites, output_vcf, bedgraph_file):
+    modified_body = modify_sites(body, prop_missing_sites)
+    write_vcf(header, modified_body, output_vcf)
+    create_bedgraph(modified_body, bedgraph_file)
+
+
 def main():
-    try:
-        from snakemake.script import snakemake
+    from snakemake.script import snakemake
 
-        input_vcf = snakemake.input["vcf"]
-        prop_missing_sites = snakemake.params["prop_missing_sites"]
-        prop_missing_genotypes = snakemake.params["prop_missing_genotypes"]
-        output_vcf = snakemake.output["vcf"]
-        bedgraph_file = snakemake.output["bed"]
-
-    except ImportError:
-        parser = argparse.ArgumentParser(
-            description="Modify VCF by introducing missing sites and genotypes."
-        )
-        parser.add_argument("-i", "--input_vcf", required=True, help="Input VCF file.")
-        parser.add_argument(
-            "-o", "--output_vcf", required=True, help="Output VCF file."
-        )
-        parser.add_argument(
-            "-b", "--bedgraph_file", required=True, help="Output BEDGRAPH file."
-        )
-        parser.add_argument(
-            "--prop_missing_sites",
-            type=float,
-            required=True,
-            help="Proportion of missing sites.",
-        )
-        parser.add_argument(
-            "--prop_missing_genotypes",
-            type=float,
-            required=True,
-            help="Proportion of missing genotypes per site.",
-        )
-
-        args = parser.parse_args()
-        input_vcf = args.input_vcf
-        output_vcf = args.output_vcf
-        prop_missing_genotypes = args.prop_missing_genotypes
-        prop_missing_sites = args.prop_missing_sites
-        bedgraph_file = args.bedgraph_file
+    input_vcf = snakemake.input["vcf"]
+    output_gtsvcf = snakemake.output["gtsvcf"]
+    bedgraph_gtsfile = snakemake.output["gtsbed"]
+    output_sitesvcf = snakemake.output["sitesvcf"]
+    bedgraph_sitesfile = snakemake.output["sitesbed"]
+    prop = float(snakemake.params["prop"])
 
     # Parse the input VCF
     header, body = parse_vcf(input_vcf)
 
-    # Modify the VCF
-    modified_body = modify_vcf(body, prop_missing_sites, prop_missing_genotypes)
+    # Start multiprocessing tasks
+    processes = []
 
-    # Write the modified VCF
-    write_vcf(header, modified_body, output_vcf)
+    # Process missing genotypes
+    p1 = Process(
+        target=process_genotypes,
+        args=(header, body, prop, output_gtsvcf, bedgraph_gtsfile),
+    )
+    processes.append(p1)
 
-    # Create the BEDGRAPH file
-    create_bedgraph(modified_body, bedgraph_file)
+    # Process missing sites
+    p2 = Process(
+        target=process_sites,
+        args=(header, body, prop, output_sitesvcf, bedgraph_sitesfile),
+    )
+    processes.append(p2)
+
+    # Start processes
+    for p in processes:
+        p.start()
+
+    # Wait for processes to finish
+    for p in processes:
+        p.join()
 
 
 if __name__ == "__main__":

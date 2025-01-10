@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import concurrent.futures
 import datetime
+import pysam
 
 
 
@@ -36,7 +37,9 @@ def write_vcf_for_sample(i, outdir, mts):
         )
 
 
-def simulate(seqlen, ne, mu, sample_size, seed, outdir, windows, max_workers):
+def simulate(
+    seqlen, ne, mu, sample_size, seed, outdir, windows, max_workers, write_indv_vcfs
+):
     # Simulate ancestry and mutations
     ts = msprime.sim_ancestry(
         sample_size,
@@ -53,18 +56,29 @@ def simulate(seqlen, ne, mu, sample_size, seed, outdir, windows, max_workers):
     ref_fasta_entry = "\n".join([">chr1", reference_sequence])
     Path(outdir, "ref.fa").write_text(ref_fasta_entry)
 
-    # Parallelize writing individual sample VCFs using ProcessPoolExecutor
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = [
-            executor.submit(write_vcf_for_sample, i, outdir, mts)
-            for i in range(sample_size)
-        ]
-        for future in concurrent.futures.as_completed(futures):
-            future.result()  # Ensures any exceptions are raised
+    if write_indv_vcfs:
+        # Parallelize writing individual sample VCFs using ProcessPoolExecutor
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=max_workers
+        ) as executor:
+            futures = [
+                executor.submit(write_vcf_for_sample, i, outdir, mts)
+                for i in range(sample_size)
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                future.result()  # Ensures any exceptions are raised
 
     # Write the combined VCF for all samples
-    with open(Path(outdir, "all.vcf"), "w") as f:
+    all_vcf_path = Path(outdir, "all.vcf")
+    with open(all_vcf_path, "w") as f:
         mts.write_vcf(f, position_transform=lambda x: np.fmax(1, x), contig_id="chr1")
+
+    pysam.tabix_compress(
+        all_vcf_path, all_vcf_path.with_suffix(all_vcf_path.suffix + ".gz")
+    )
+    pysam.tabix_index(
+        str(all_vcf_path.with_suffix(all_vcf_path.suffix + ".gz")), preset="vcf"
+    )
 
     # Calculate summary statistics
     pi = mts.diversity()
@@ -90,7 +104,7 @@ def simulate(seqlen, ne, mu, sample_size, seed, outdir, windows, max_workers):
         )
 
         with open(outfile, "w") as f:
-            f.write("chrom,start,end,pi\n")
+            f.write("chrom\tstart\tend\tpi\n")
             f.writelines(lines)
 def main():
     try:
@@ -104,6 +118,7 @@ def main():
         seqlen = snakemake.params["seqlen"]  # noqa: F821
 
         windows = snakemake.params.get("windows", None)
+        write_indv_vcfs = snakemake.params.get("indv_vcfs", True)
         max_workers = snakemake.threads
 
     except ImportError:
@@ -125,6 +140,13 @@ def main():
             "--windows", type=int, help="bp size of windows", required=False
         )
         parser.add_argument("--threads", type=int, help="num threads", required=True)
+        parser.add_argument(
+            "--indv-vcfs",
+            type=bool,
+            help="write indvidual vcfs",
+            required=False,
+            default=True,
+        )
 
         args = parser.parse_args()
 
@@ -136,11 +158,14 @@ def main():
         seed = args.seed
         windows = args.windows
         max_workers = args.threads
+        write_indv_vcfs = args.indv_vcfs
 
     if windows is not None:
         windows = generate_windows(seqlen, windows)
 
-    simulate(seqlen, ne, mu, sample_size, seed, outdir, windows, max_workers)
+    simulate(
+        seqlen, ne, mu, sample_size, seed, outdir, windows, max_workers, write_indv_vcfs
+    )
 
 
 if __name__ == "__main__":

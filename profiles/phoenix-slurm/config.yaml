@@ -1,13 +1,13 @@
 executor: slurm
 nolock: True
-jobs: 30  # Have up to N jobs submitted at any given time
-latency-wait: 100  # Wait N seconds for output files due to latency
-retries: 3  # Retry jobs N times.
-max-jobs-per-second: 5
+jobs: 300  # Have up to N jobs submitted at any given time
+latency-wait: 30  # Wait N seconds for output files due to latency
+retries: 0  # Retry jobs N times.
+keep-going: True
+# max-jobs-per-second: 5
 max-status-checks-per-second: 5
 default-resources:
   mem_mb: 32000
-  mem_mb_reduced: (attempt * 32000) * 0.9  # Mem allocated to java for GATK rules (tries to prevent OOM errors)
   slurm_partition: "short"
   slurm_account:  # Same as sbatch -A. Not all clusters use this.
   runtime: 60  # In minutes

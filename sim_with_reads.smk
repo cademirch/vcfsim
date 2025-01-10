@@ -3,17 +3,17 @@ import random
 
 MASON_BIN = Path(workflow.basedir, "mason2-2.0.9-Linux-x86_64/bin/mason_simulator")
 CLAM = Path(workflow.basedir, "clam/target/release/clam")
-MOSDEPTH = Path(workflow.basedir, "mosdepth_d4")
-SAMPLES = [f"sample_{i}" for i in range(10)]
-SEQLEN = 10_000
+SAMPLES = [f"tsk_{i}" for i in range(10)]
+
+SEQLEN = 1_000_000
 COVERAGE = 10
 NUM_READS = (SEQLEN * COVERAGE) // 300
 SEED = int(config.get("seed", 1234))
 logger.warning(f"seed = {SEED}")
-NE=1e6
-MU=1e-8
-CLAM_LOCI_MIN_DEPTH = 5
-CLAM_LOCI_MAX_DEPTH = 20
+NE=1e4
+MU=2.5e-8
+MIN_DEPTH = 2
+
 MAX_MISSING = 0.8
 CLAM_LOCI_THREADS = 4
 CLAM_STAT_THREADS = 4
@@ -30,15 +30,17 @@ rule all:
         "pixy_pi.txt",
         "clam_pi.tsv",
         "msprime_pi_windows.tsv",
+        "vcftools_pi.txt"
         
 rule simulate:
     output:
-        temp(expand("sim/{sample}.vcf", sample=SAMPLES)),
+        "sim/all.vcf.gz",
+        "sim/all.vcf.gz.tbi",
         "sim/sim_results.txt",
         "msprime_pi_windows.tsv",
         "sim/ref.fa"
     conda:
-        "envs/env.yaml"
+        "clam_benchmarking"
     threads: 4
     params:
         ne = NE,
@@ -47,9 +49,23 @@ rule simulate:
         seed = SEED,
         outdir = "sim",
         seqlen = SEQLEN,
-        windows=1000
+        windows=1000,
+        indv_vcfs=False
     script:
         "scripts/simulate.py"
+
+rule split_vcf:
+    input:
+        vcf = "sim/all.vcf.gz",
+        idx = "sim/all.vcf.gz.tbi",
+    output:
+        "sim/{sample}.vcf"
+    conda:
+        "clam_benchmarking"
+    shell:
+        """
+        bcftools view -s {wildcards.sample} {input.vcf} > {output}
+        """
 
 rule bwa_index:
     input:
@@ -57,10 +73,23 @@ rule bwa_index:
     output:
         expand("sim/ref.fa.{index}", index=["bwt", "amb", "ann", "pac", "sa"])
     conda:
-        "envs/env.yaml"
+        "clam_benchmarking"
     shell:
         "bwa index {input}"
 
+rule samtools_index:
+    input:
+        "sim/ref.fa"
+    output:
+        fai = "sim/ref.fa.fai",
+        dictf = "sim/ref.dict"
+    conda:
+        "clam_benchmarking"
+    shell:
+        """
+        samtools faidx {input}
+        samtools dict {input} > {output.dictf}
+        """
 
 rule simulate_reads:
     input:
@@ -99,7 +128,7 @@ rule bwa:
     params:
         rg = r"'@RG\tID:{sample}\tSM:{sample}\tLB:{sample}\tPL:ILLUMINA'"
     conda:
-        "envs/env.yaml"
+        "clam_benchmarking"
     log:
         "logs/bwa/{sample}.txt"
     threads: 4
@@ -112,75 +141,53 @@ rule bwa:
 
 rule mosdepth:
     input:
-        exe = MOSDEPTH,
         bam = "bams/{sample}.bam",
         index = "bams/{sample}.bam.bai"
     output:
         "depths/{sample}.per-base.d4"
     params:
         prefix=lambda wc, output: output[0].replace(".per-base.d4", ""),
+    conda:
+        "clam_benchmarking"
     shadow: "minimal"
+    
     shell:
         """
-        {input.exe} --d4 {params.prefix} {input.bam}
-        """
-rule merge_d4:
-    input:
-        expand("depths/{sample}.per-base.d4", sample=SAMPLES)
-    output:
-        "d4/merged.d4"
-    conda:
-        "envs/mosdepth.yaml"
-    benchmark:
-        "benchmarks/merge_d4/benchmark.txt"
-    shell:
-        """
-        d4tools merge {input} {output}
-        """
-rule bgzip_d4:
-    input:
-        "d4/merged.d4"
-    output:
-        gz= "d4/merged.d4.gz",
-        gzi = "d4/merged.d4.gz.gzi"
-    conda:
-        "envs/env.yaml"
-    benchmark:
-        "benchmarks/bgzip_d4/benchmark.txt"
-    shell:
-        """
-        bgzip -c --binary {input} > {output.gz} && bgzip --reindex {output.gz}
+        mosdepth --d4 {params.prefix} {input.bam}
         """
 
-rule clam_stat_bgzf:
+rule bgzip_d4:
     input:
-        clam_binary = CLAM,
-        vcf="vcf/filtered_vars.vcf.gz",
-        tbi="vcf/filtered_vars.vcf.gz.tbi",
-        callable_sites= "clam_loci_bgzf/callable_sites.d4"
+        "depths/{sample}.per-base.d4"
     output:
-        pi="clam_pi.tsv",
-    params:
-        outdir="clam_stat_bgzf",
-    log: "logs/clam_stat_bgzf/log.txt"
-    benchmark:
-        "benchmarks/clam_stat_bgzf/benchmark.txt"
-    threads: CLAM_STAT_THREADS
+        "depths/{sample}.per-base.d4.gz",
+        "depths/{sample}.per-base.d4.gz.gzi"
     shell:
         """
-        {input.clam_binary} stat -t {threads} -w 1000 {input.vcf} {input.callable_sites}
+        bgzip --index {input}
         """
+
+rule d4_fof:
+    input:
+        expand("depths/{sample}.per-base.d4.gz", sample=SAMPLES)
+    output:
+        "depths/fof.txt"
+    shell:
+        """
+        ls depths/*.per-base.d4.gz > {output}
+        """
+
 
 rule clam_loci:
     input:
         clam_binary = CLAM,
-        d4 = "d4/merged.d4"
+        d4 ="depths/fof.txt"
     output:
         "clam_loci/callable_sites.d4"
     params:
-        depth = f"-m {CLAM_LOCI_MIN_DEPTH} -M {CLAM_LOCI_MAX_DEPTH}",
+        depth = f"-m {MIN_DEPTH}",
         prefix = "clam_loci/callable_sites"
-    threads: CLAM_LOCI_THREADS
+    threads: 1
     log: "logs/clam_loci/log.txt"
     benchmark:
         "benchmarks/clam_loci/benchmark.txt"
@@ -188,103 +195,62 @@ rule clam_loci:
         """
         {input.clam_binary} loci {params.depth} -t {threads} {input.d4} {params.prefix} 2> {log}
         """
-rule clam_loci_bgzf:
-    input:
-        clam_binary = CLAM,
-        d4 = "d4/merged.d4.gz"
-    output:
-        "clam_loci_bgzf/callable_sites.d4"
-    params:
-        depth = f"-m {CLAM_LOCI_MIN_DEPTH} -M {CLAM_LOCI_MAX_DEPTH}",
-        prefix = "clam_loci_bgzf/callable_sites"
-    threads: CLAM_LOCI_THREADS
-    log: "logs/clam_loci_bgzf/log.txt"
-    benchmark:
-        "benchmarks/clam_loci_bgzf/benchmark.txt"
-    shell:
-        """
-        {input.clam_binary} loci {params.depth} -t {threads} {input.d4} {params.prefix} 2> {log}
-        """
 
-rule bcftools:
+
+rule bcftools_call:
     input:
         ref = "sim/ref.fa",
+        fai = "sim/ref.fa.fai",
+        dictf = "sim/ref.dict",
         bams = expand("bams/{sample}.bam", sample=SAMPLES)
     output:
-        vcf="vcf/vars.vcf.gz",
-        tbi="vcf/vars.vcf.gz.tbi"
+        vcf = "vars/allsites.vcf", # for debugging
+        vcfgz = "vars/allsites.vcf.gz",
+        vcftbi = "vars/allsites.vcf.gz.tbi"
     conda:
-        "envs/env.yaml"
+        "clam_benchmarking"
     shell:
         """
-        bcftools mpileup -f {input.ref} --annotate FORMAT/DP {input.bams} | \
-        bcftools call -m -Oz -o {output.vcf}
-        tabix -p vcf {output.vcf}
+        bcftools mpileup -Ou --annotate 'FMT/DP' -f {input.ref} {input.bams} | bcftools call -m -Ov -o {output.vcf}
+        bgzip -c {output.vcf} > {output.vcfgz}
+        tabix -p vcf {output.vcfgz}
         """
-rule create_invar_only:
+
+rule bcftools_filter:
     input:
-        vcf="vcf/vars.vcf.gz",
-        tbi="vcf/vars.vcf.gz.tbi"
+        vcfgz = "vars/allsites.vcf.gz",
+        vcftbi = "vars/allsites.vcf.gz.tbi"
     output:
-        vcf="vcf/invars.vcf.gz",
-        tbi="vcf/invars.vcf.gz.tbi"
+        vcf = "vars/allsites.filtered.vcf", # for debugging
+        vcfgz = "vars/allsites.filtered.vcf.gz",
+        vcftbi = "vars/allsites.filtered.vcf.gz.tbi"
+    conda:
+        "clam_benchmarking"
     params:
-        min_mean_depth = CLAM_LOCI_MIN_DEPTH,
-        max_mean_depth = CLAM_LOCI_MAX_DEPTH,
-        max_missing = MAX_MISSING,
-    conda:
-        "envs/env.yaml"
+        min_depth = MIN_DEPTH,
     shell:
         """
-        (vcftools --gzvcf {input.vcf} \
-        --max-maf 0 \
-        --min-meanDP {params.min_mean_depth} \
-        --max-meanDP {params.max_mean_depth} \
-        --recode --stdout | bgzip -c > {output.vcf}) && tabix -p vcf {output.vcf}
+        bcftools view --exclude-types indels --max-alleles 2 {input.vcfgz} | bcftools +setGT - -- -t q -n . -e 'FMT/DP>{params.min_depth}' > {output.vcf}
+        bgzip -c {output.vcf} > {output.vcfgz}
+        tabix -p vcf {output.vcfgz}
         """
 
-    
-rule vcftools_filter:
+rule bcftools_vars_only:
     input:
-        vcf="vcf/vars.vcf.gz",
-        tbi="vcf/vars.vcf.gz.tbi"
+        vcfgz = "vars/allsites.filtered.vcf.gz",
+        vcftbi = "vars/allsites.filtered.vcf.gz.tbi"
     output:
-        vcf="vcf/filtered_vars.vcf.gz",
-        tbi="vcf/filtered_vars.vcf.gz.tbi"
-    params:
-        min_mean_depth = CLAM_LOCI_MIN_DEPTH,
-        max_mean_depth = CLAM_LOCI_MAX_DEPTH,
-        max_missing = MAX_MISSING,
+        vcf = "vars/vars_only.filtered.vcf", # for debugging
+        vcfgz = "vars/vars_only.filtered.vcf.gz",
+        vcftbi = "vars/vars_only.filtered.vcf.gz.tbi"
     conda:
-        "envs/env.yaml"
+        "clam_benchmarking"
     shell:
         """
-        (vcftools --gzvcf {input.vcf} \
-        --remove-indels \
-        --min-meanDP {params.min_mean_depth} \
-        --max-meanDP {params.max_mean_depth} \
-        --non-ref-ac-any 1 \
-        --recode --stdout | bgzip -c > {output.vcf}) && tabix -p vcf {output.vcf}
+        bcftools view -e 'ALT="."' {input.vcfgz} > {output.vcf}
+        bgzip -c {output.vcf} > {output.vcfgz}
+        tabix -p vcf {output.vcfgz}
         """
-
-rule bcftools_concat:
-    input:
-        varvcf="vcf/filtered_vars.vcf.gz",
-        vartbi="vcf/filtered_vars.vcf.gz.tbi",
-        invarvcf="vcf/invars.vcf.gz",
-        invartbi="vcf/invars.vcf.gz.tbi"
-    output:
-        vcf="vcf/allsites_filtered.vcf.gz",
-        tbi="vcf/allsites_filtered.vcf.gz.tbi"
-    conda:
-        "envs/env.yaml"
-    shell:
-        """
-        bcftools concat -Ov -a -D {input.varvcf} {input.invarvcf} | bgzip -c > {output.vcf}
-        tabix -p vcf {output.vcf}
-        """
-
-
 
 
 rule write_pops_file:
@@ -293,17 +259,57 @@ rule write_pops_file:
         lines = "\n".join([f"{s}\tpop1" for s in SAMPLES])
         with open(output[0], "w") as f:
             f.writelines(lines)
+rule vcftools_pi:
+    input:
+        vcf = "vars/allsites.filtered.vcf.gz",
+        vcftbi = "vars/allsites.filtered.vcf.gz.tbi",
+        pops = "vcf/pops.txt"
+    params:
+        windows=1000
+    output:
+        "vcftools_pi.txt"
+    conda: "clam_benchmarking"
+    shadow: "minimal"
+    benchmark:
+        "benchmarks/vcftools_pi/benchmark.txt"
+    threads: 1
+    shell:
+        """
+        vcftools --gzvcf {input.vcf} --window-pi {params.windows} --stdout > {output}
+        """
 
 rule pixy:
     input:
-        vcf="vcf/allsites_filtered.vcf.gz",
-        tbi="vcf/allsites_filtered.vcf.gz.tbi",
+        vcf = "vars/allsites.filtered.vcf.gz",
+        vcftbi = "vars/allsites.filtered.vcf.gz.tbi",
         pops = "vcf/pops.txt"
     params:
         windows=1000
     output:
         "pixy_pi.txt"
-    conda: "envs/pixy.yaml"
+    conda: "pixy"
     shadow: "minimal"
+    benchmark:
+        "benchmarks/pixy/benchmark.txt"
+    threads: 1
     shell:
-        "pixy --stats pi --vcf {input.vcf} --window_size {params.windows} --populations {input.pops}"
+        "pixy --n_cores {threads} --stats pi --vcf {input.vcf} --window_size {params.windows} --populations {input.pops}"
+
+rule clam_stat_bgzf:
+    input:
+        clam_binary = CLAM,
+        vcf="vars/vars_only.filtered.vcf.gz",
+        vcftbi = "vars/vars_only.filtered.vcf.gz.tbi",
+        callable_sites= "clam_loci/callable_sites.d4"
+    output:
+        pi="clam_pi.tsv",
+    params:
+        outdir="clam_stat_bgzf",
+    log: "logs/clam_stat_bgzf/log.txt"
+    benchmark:
+        "benchmarks/clam_stat/benchmark.txt"
+    threads: 1
+    shell:
+        """
+        {input.clam_binary} stat -t {threads} -w 1000 {input.vcf} {input.callable_sites}
+        """
