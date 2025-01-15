@@ -38,7 +38,16 @@ def write_vcf_for_sample(i, outdir, mts):
 
 
 def simulate(
-    seqlen, ne, mu, sample_size, seed, outdir, windows, max_workers, write_indv_vcfs
+    seqlen,
+    ne,
+    mu,
+    sample_size,
+    seed,
+    outdir,
+    windows,
+    max_workers,
+    write_indv_vcfs,
+    output_ts,
 ):
     # Simulate ancestry and mutations
     ts = msprime.sim_ancestry(
@@ -69,16 +78,21 @@ def simulate(
                 future.result()  # Ensures any exceptions are raised
 
     # Write the combined VCF for all samples
-    all_vcf_path = Path(outdir, "all.vcf")
-    with open(all_vcf_path, "w") as f:
-        mts.write_vcf(f, position_transform=lambda x: np.fmax(1, x), contig_id="chr1")
+    if output_ts:
+        mts.dump(Path(outdir, "all.trees"))
+    else:
+        all_vcf_path = Path(outdir, "all.vcf")
+        with open(all_vcf_path, "w") as f:
+            mts.write_vcf(
+                f, position_transform=lambda x: np.fmax(1, x), contig_id="chr1"
+            )
 
-    pysam.tabix_compress(
-        all_vcf_path, all_vcf_path.with_suffix(all_vcf_path.suffix + ".gz")
-    )
-    pysam.tabix_index(
-        str(all_vcf_path.with_suffix(all_vcf_path.suffix + ".gz")), preset="vcf"
-    )
+        pysam.tabix_compress(
+            all_vcf_path, all_vcf_path.with_suffix(all_vcf_path.suffix + ".gz")
+        )
+        pysam.tabix_index(
+            str(all_vcf_path.with_suffix(all_vcf_path.suffix + ".gz")), preset="vcf"
+        )
 
     # Calculate summary statistics
     pi = mts.diversity()
@@ -120,6 +134,7 @@ def main():
         windows = snakemake.params.get("windows", None)
         write_indv_vcfs = snakemake.params.get("indv_vcfs", True)
         max_workers = snakemake.threads
+        output_ts = False
 
     except ImportError:
         parser = argparse.ArgumentParser()
@@ -145,7 +160,14 @@ def main():
             type=bool,
             help="write indvidual vcfs",
             required=False,
-            default=True,
+            default=False,
+        )
+        parser.add_argument(
+            "--output-ts",
+            help="write tree seq instead of vcf",
+            required=False,
+            default=False,
+            action="store_true",
         )
 
         args = parser.parse_args()
@@ -159,12 +181,22 @@ def main():
         windows = args.windows
         max_workers = args.threads
         write_indv_vcfs = args.indv_vcfs
+        output_ts = args.output_ts
 
     if windows is not None:
         windows = generate_windows(seqlen, windows)
 
     simulate(
-        seqlen, ne, mu, sample_size, seed, outdir, windows, max_workers, write_indv_vcfs
+        seqlen,
+        ne,
+        mu,
+        sample_size,
+        seed,
+        outdir,
+        windows,
+        max_workers,
+        write_indv_vcfs,
+        output_ts,
     )
 
 

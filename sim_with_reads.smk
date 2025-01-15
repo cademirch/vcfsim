@@ -5,7 +5,7 @@ MASON_BIN = Path(workflow.basedir, "mason2-2.0.9-Linux-x86_64/bin/mason_simulato
 CLAM = Path(workflow.basedir, "clam/target/release/clam")
 SAMPLES = [f"tsk_{i}" for i in range(10)]
 
-SEQLEN = 1_000_000
+SEQLEN = 1000
 COVERAGE = 10
 NUM_READS = (SEQLEN * COVERAGE) // 300
 SEED = int(config.get("seed", 1234))
@@ -13,6 +13,7 @@ logger.warning(f"seed = {SEED}")
 NE=1e4
 MU=2.5e-8
 MIN_DEPTH = 2
+WINDOW_SIZE = 1000
 
 MAX_MISSING = 0.8
 CLAM_LOCI_THREADS = 4
@@ -27,10 +28,11 @@ def read_seed(wc):
 
 rule all:
     input:
+        # expand("depths/{sample}.per-base.d4", sample=SAMPLES)
         "pixy_pi.txt",
         "clam_pi.tsv",
-        "msprime_pi_windows.tsv",
-        "vcftools_pi.txt"
+        # "msprime_pi_windows.tsv",
+        # "vcftools_pi.txt"
         
 rule simulate:
     output:
@@ -102,7 +104,8 @@ rule simulate_reads:
         
     output:
         r1 = temp("reads/{sample}_R1.fq"),
-        r2 = temp("reads/{sample}_R2.fq")
+        r2 = temp("reads/{sample}_R2.fq"),
+        sam=temp("alignments/{sample}.sam")
     log:
         "logs/sim_reads/{sample}.txt"
     threads: 4
@@ -115,29 +118,44 @@ rule simulate_reads:
         -n {params.num_reads} \
         --illumina-read-length 150 \
         --num-threads {threads} \
-        -o {output.r1} -or {output.r2} &> {log}
+        -o {output.r1} -or {output.r2} -oa {output.sam} &> {log}
         """
-        
 
-rule bwa:
+rule samtools_sort:
     input:
-        ref = "sim/ref.fa",
-        ref_idx = rules.bwa_index.output,
-        r1= "reads/{sample}_R1.fq",
-        r2= "reads/{sample}_R2.fq"
+        sam = "alignments/{sample}.sam"
+    output:
+        bam="bams/{sample}.bam",
+        bai="bams/{sample}.bam.bai"
     params:
         rg = r"'@RG\tID:{sample}\tSM:{sample}\tLB:{sample}\tPL:ILLUMINA'"
     conda:
         "clam_benchmarking"
     log:
         "logs/bwa/{sample}.txt"
-    threads: 4
-    output:
-        bam="bams/{sample}.bam",
-        bai="bams/{sample}.bam.bai"
-    shadow: "minimal"
     shell:
-        "bwa mem -t {threads} -R {params.rg} {input.ref} {input.r1} {input.r2} 2> {log} | samtools sort - 2>> {log}| samtools view -b > {output.bam} 2>> {log} && samtools index {output.bam} 2>> {log}"
+        "samtools addreplacerg -r {params.rg} {input.sam} 2> {log} | samtools sort - 2>> {log}| samtools view -b > {output.bam} 2>> {log} && samtools index {output.bam} 2>> {log}"
+
+
+# rule bwa:
+#     input:
+#         ref = "sim/ref.fa",
+#         ref_idx = rules.bwa_index.output,
+#         r1= "reads/{sample}_R1.fq",
+#         r2= "reads/{sample}_R2.fq"
+#     params:
+#         rg = r"'@RG\tID:{sample}\tSM:{sample}\tLB:{sample}\tPL:ILLUMINA'"
+#     conda:
+#         "clam_benchmarking"
+#     log:
+#         "logs/bwa/{sample}.txt"
+#     threads: 4
+#     output:
+#         bam="bams/{sample}.bam",
+#         bai="bams/{sample}.bam.bai"
+#     shadow: "minimal"
+#     shell:
+#         "bwa mem -t {threads} -R {params.rg} {input.ref} {input.r1} {input.r2} 2> {log} | samtools sort - 2>> {log}| samtools view -b > {output.bam} 2>> {log} && samtools index {output.bam} 2>> {log}"
 
 rule mosdepth:
     input:
@@ -181,7 +199,8 @@ rule d4_fof:
 rule clam_loci:
     input:
         clam_binary = CLAM,
-        d4 ="depths/fof.txt"
+        d4 ="depths/fof.txt",
+        pops = "vcf/clam_pops.txt"
     output:
         "clam_loci/callable_sites.d4"
     params:
@@ -193,7 +212,7 @@ rule clam_loci:
         "benchmarks/clam_loci/benchmark.txt"
     shell:
         """
-        {input.clam_binary} loci {params.depth} -t {threads} {input.d4} {params.prefix} 2> {log}
+        {input.clam_binary} loci -p {input.pops} {params.depth} -t {threads} {input.d4} {params.prefix} 2> {log}
         """
 
 
@@ -252,31 +271,39 @@ rule bcftools_vars_only:
         tabix -p vcf {output.vcfgz}
         """
 
-
 rule write_pops_file:
     output: "vcf/pops.txt"
     run:
-        lines = "\n".join([f"{s}\tpop1" for s in SAMPLES])
+        lines = [f"{s}\tpop1\n" for s in SAMPLES]
+        
+        # Split the list into two populations
+        mid = len(SAMPLES) // 2
+        pop1 = lines[:mid]
+        pop2 = [line.replace("\tpop1", "\tpop2") for line in lines[mid:]]
+        
+        # Write to the output file
         with open(output[0], "w") as f:
-            f.writelines(lines)
-rule vcftools_pi:
-    input:
-        vcf = "vars/allsites.filtered.vcf.gz",
-        vcftbi = "vars/allsites.filtered.vcf.gz.tbi",
-        pops = "vcf/pops.txt"
-    params:
-        windows=1000
-    output:
-        "vcftools_pi.txt"
-    conda: "clam_benchmarking"
-    shadow: "minimal"
-    benchmark:
-        "benchmarks/vcftools_pi/benchmark.txt"
-    threads: 1
-    shell:
-        """
-        vcftools --gzvcf {input.vcf} --window-pi {params.windows} --stdout > {output}
-        """
+            f.writelines(pop1 + pop2)
+
+
+# rule vcftools_pi:
+#     input:
+#         vcf = "vars/allsites.filtered.vcf.gz",
+#         vcftbi = "vars/allsites.filtered.vcf.gz.tbi",
+#         pops = "vcf/pops.txt"
+#     params:
+#         windows=1000
+#     output:
+#         "vcftools_pi.txt"
+#     conda: "clam_benchmarking"
+#     shadow: "minimal"
+#     benchmark:
+#         "benchmarks/vcftools_pi/benchmark.txt"
+#     threads: 1
+#     shell:
+#         """
+#         vcftools --gzvcf {input.vcf} --window-pi {params.windows} --stdout > {output}
+#         """
 
 rule pixy:
     input:
@@ -284,32 +311,34 @@ rule pixy:
         vcftbi = "vars/allsites.filtered.vcf.gz.tbi",
         pops = "vcf/pops.txt"
     params:
-        windows=1000
+        windows=WINDOW_SIZE
     output:
         "pixy_pi.txt"
     conda: "pixy"
-    shadow: "minimal"
+    # shadow: "minimal"
     benchmark:
         "benchmarks/pixy/benchmark.txt"
     threads: 1
     shell:
-        "pixy --n_cores {threads} --stats pi --vcf {input.vcf} --window_size {params.windows} --populations {input.pops}"
+        "pixy --n_cores {threads} --stats pi dxy fst --fst_type hudson --vcf {input.vcf} --window_size {params.windows} --populations {input.pops}"
 
 rule clam_stat_bgzf:
     input:
         clam_binary = CLAM,
         vcf="vars/vars_only.filtered.vcf.gz",
         vcftbi = "vars/vars_only.filtered.vcf.gz.tbi",
-        callable_sites= "clam_loci/callable_sites.d4"
+        callable_sites= "clam_loci/callable_sites.d4",
+        pops = "vcf/clam_pops.txt"
     output:
         pi="clam_pi.tsv",
     params:
         outdir="clam_stat_bgzf",
+        windows=WINDOW_SIZE
     log: "logs/clam_stat_bgzf/log.txt"
     benchmark:
         "benchmarks/clam_stat/benchmark.txt"
     threads: 1
     shell:
         """
-        {input.clam_binary} stat -t {threads} -w 1000 {input.vcf} {input.callable_sites}
+        {input.clam_binary} stat -t {threads} -p {input.pops} -w {params.windows} {input.vcf} {input.callable_sites}
         """

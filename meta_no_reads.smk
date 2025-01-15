@@ -6,8 +6,8 @@ For clam, since we dont have bams in this simulation, we just record the number 
 localrules: setup_clam, setup_mason, setup_mosdepth, all
 import pandas as pd
 
-NUM_REPS=range(1,1001) #seed for msprime gotta be greater than 0
-THREADS_PER_RUN=32
+NUM_REPS=range(1,101) #seed for msprime gotta be greater than 0
+THREADS_PER_RUN=10
 SNAKEFILE_PATH = Path(workflow.basedir,"sim_no_reads.smk")
 CONDA_PREFIX = Path(workflow.basedir,"")
 CLAM_URL = "https://github.com/cademirch/clam.git"

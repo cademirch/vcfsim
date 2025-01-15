@@ -6,7 +6,7 @@ import pandas as pd
 #     missingtype="[^\W_]"
 
 CLAM = Path(workflow.basedir, "clam/target/release/clam")
-SAMPLES = [f"sample_{i}" for i in range(10)]
+SAMPLES = [f"tsk_{i}" for i in range(10)]
 SEQLEN = 10_000
 SEED = int(config.get("seed", 1234))
 logger.warning(f"{SEED=}")
@@ -77,13 +77,16 @@ rule add_invar:
 
 rule add_missing:
     input:
-        vcf = "vcf/allsites.vcf"
+        vcf = "vcf/allsites.vcf",
+        populations = "vcf/pops.txt"
     output:
         gtsvcf = "vcf/prop_{prop}/allsites_missing_gts.vcf",
-        gtsbed = "callable/prop_{prop}/callable_gts.bedgraph",
+        gtsbed1 = "callable/prop_{prop}/callable_gts.pop1.bedgraph",
+        gtsbed2 = "callable/prop_{prop}/callable_gts.pop2.bedgraph",
         gtsgenome = "callable/prop_{prop}/genome.txt",
         sitesvcf = "vcf/prop_{prop}/allsites_missing_sites.vcf",
-        sitesbed = "callable/prop_{prop}/callable_sites.bedgraph",
+        sitesbed1 = "callable/prop_{prop}/callable_sites.pop1.bedgraph",
+        sitesbed2 = "callable/prop_{prop}/callable_sites.pop2.bedgraph",
     threads: 2
     params:
         prop="{prop}"
@@ -92,10 +95,10 @@ rule add_missing:
 
 rule d4tools_create:
     input:
-        bed = "callable/prop_{prop}/callable_{missingtype}.bedgraph",
+        bed = "callable/prop_{prop}/callable_{missingtype}.{population}.bedgraph",
         genome = "callable/prop_{prop}/genome.txt" # for d4tools create
     output:
-        "callable/prop_{prop}/callable_{missingtype}.d4"
+        "callable/prop_{prop}/callable_{missingtype}.{population}.d4"
     conda:
         "mosdepth"
     shell:
@@ -104,6 +107,17 @@ rule d4tools_create:
         d4tools index build -s {output}
         """
 
+rule d4tools_merge:
+    input:
+        expand("callable/prop_{{prop}}/callable_{{missingtype}}.{population}.d4", population=["pop1", "pop2"])
+    output:
+        "callable/prop_{prop}/callable_{missingtype}.d4"
+    conda:
+        "mosdepth"
+    shell:
+        """
+        d4tools merge {input} {output}
+        """
 rule variants_only_allsites:
     input:
         allsitesvcf = "vcf/allsites.vcf",
@@ -157,9 +171,11 @@ rule clam_allsites:
         clam_binary = CLAM,
         allsites = "vcf/allsites.vcf.gz",
         allsitesidx = "vcf/allsites.vcf.gz.tbi",
+        p = "vcf/pops.txt"
         
     output:
         allsites = "clam_allsites/clam_pi.tsv",
+        dxy = "clam_allsites/clam_dxy.tsv"
         
     benchmark:
         "benchmarks/clam_allsites.txt"
@@ -167,7 +183,7 @@ rule clam_allsites:
         windows=WINDOW_SIZE
     shell:
         """
-        {input.clam_binary} --quiet stat -w {params.windows} -o clam_allsites {input.allsites}
+        {input.clam_binary} --quiet stat -p {input.p} -w {params.windows} -o clam_allsites {input.allsites}
         """
 
 rule clam_missing:
@@ -177,8 +193,10 @@ rule clam_missing:
 
         varmissingvcf_idx = "vcf/prop_{prop}/varsonly_{missingtype}.vcf.gz.tbi",
         callable_sites = "callable/prop_{prop}/callable_{missingtype}.d4",
+        p = "vcf/pops.txt",
     output:
-        missing = "clam_missing/prop_{prop}/{missingtype}/clam_pi.tsv"
+        missing = "clam_missing/prop_{prop}/{missingtype}/clam_pi.tsv",
+        dxy = "clam_missing/prop_{prop}/{missingtype}/clam_dxy.tsv"
     params:
         windows=WINDOW_SIZE,
         outdir= "clam_missing/prop_{prop}/{missingtype}"
@@ -186,57 +204,95 @@ rule clam_missing:
         "logs/clam_{missingtype}_{prop}.txt"
     shell:
         """
-        {input.clam_binary} --quiet stat -w {params.windows} -o {params.outdir} {input.varmissingvcf} {input.callable_sites} || touch {output}
+        {input.clam_binary} --quiet stat -p {input.p} -w {params.windows} -o {params.outdir} {input.varmissingvcf} {input.callable_sites} || touch {output}
         """
+
+
+def process_stats(pi_tsv, dxy_tsv, allsites_pi, allsites_dxy, tool):
+    """
+    Process pi and dxy statistics for a given tool and missing data files
+    
+    Args:
+        pi_tsv: Path to pi statistics file
+        dxy_tsv: Path to dxy statistics file
+        allsites_pi: DataFrame with pi statistics for all sites
+        allsites_dxy: DataFrame with dxy statistics for all sites
+        tool: String indicating the tool used ('pixy' or 'clam')
+    
+    Returns:
+        List of dictionaries with processed statistics
+    """
+    results = []
+    missingtype = Path(pi_tsv).parent.name
+    prop = float(Path(pi_tsv).parent.parent.name.split("_")[1])
+    
+    try:
+        # Handle pi
+        pi_df = pd.read_csv(pi_tsv, sep="\t")
+        pi_dict = {
+            "tool": tool,
+            "stat": "pi",
+            "allsites_value": allsites_pi['avg_pi' if tool == 'pixy' else 'pi'].iloc[0],
+            "missing_value": pi_df['avg_pi' if tool == 'pixy' else 'pi'].iloc[0],
+            "missingtype": missingtype,
+            "prop_missing": prop
+        }
+        results.append(pi_dict)
+        
+        # Handle dxy
+        dxy_df = pd.read_csv(dxy_tsv, sep="\t")
+        dxy_dict = {
+            "tool": tool,
+            "stat": "dxy",
+            "allsites_value": allsites_dxy['avg_dxy' if tool == 'pixy' else 'dxy'].iloc[0],
+            "missing_value": dxy_df['avg_dxy' if tool == 'pixy' else 'dxy'].iloc[0],
+            "missingtype": missingtype,
+            "prop_missing": prop
+        }
+        results.append(dxy_dict)
+        
+    except pd.errors.EmptyDataError:
+        pass
+        
+    return results
 
 
 rule combine_clam:
     input:
-        allsites = "clam_allsites/clam_pi.tsv",
-        missing = expand("clam_missing/prop_{prop}/{missingtype}/clam_pi.tsv", prop=PROPS, missingtype=MISSINGTYPES)
+        allsites_pi = "clam_allsites/clam_pi.tsv",
+        allsites_dxy = "clam_allsites/clam_dxy.tsv",
+        missing_pi = expand("clam_missing/prop_{prop}/{missingtype}/clam_pi.tsv", prop=PROPS, missingtype=MISSINGTYPES),
+        missing_dxy = expand("clam_missing/prop_{prop}/{missingtype}/clam_dxy.tsv", prop=PROPS, missingtype=MISSINGTYPES)
     output:
-        raw = "clam_pi.tsv",
+        # raw = "clam_pi_dxy.tsv",
         ratio = "clam_ratios.tsv"
     run:
         import pandas as pd
         from pathlib import Path
-        missing_dfs = []
-        for tsv in input.missing:
-            missingtype = Path(tsv).parent.name
-            prop = float(Path(tsv).parent.parent.name.split("_")[1])
-            try:
-                df = pd.read_csv(tsv, sep="\t")
-                df["missingtype"] = missingtype
-                df["prop"] = prop
-                
-                missing_dfs.append(df)
-            except pd.errors.EmptyDataError:
-                continue
-        missing_df = pd.concat(missing_dfs)
-
-        allsites_df = pd.read_csv(input.allsites, sep="\t")
         
-        # # Concatenate the two DataFrames
-        combined_df = pd.concat([allsites_df, missing_df], ignore_index=True)
-        combined_df.to_csv(output[0], sep="\t", index=False)
+        # Read allsites data first
+        allsites_pi = pd.read_csv(input.allsites_pi, sep="\t")
+        allsites_dxy = pd.read_csv(input.allsites_dxy, sep="\t")
         
-        merged_df = allsites_df.merge(
-            missing_df,
-            on=["chrom", "start", "end", "population_name"],
-            suffixes=("_allsites", "_missing")
-        )
-
-        # # Divide the 'pi' values: allsites / missing
-        merged_df['pi_ratio'] =  merged_df['pi_missing'] / merged_df['pi_allsites']
-        merged_df["tool"] = "clam"
-        merged_df.to_csv(output[1], sep="\t", index=False)
+        results = []
+        for pi_tsv, dxy_tsv in zip(input.missing_pi, input.missing_dxy):
+            results.extend(process_stats(pi_tsv, dxy_tsv, allsites_pi, allsites_dxy, "clam"))
         
+        result_df = pd.DataFrame(results)
+        result_df.to_csv(output.ratio, sep="\t", index=False)
 rule write_pops_file:
     output: "vcf/pops.txt"
     run:
-        lines = "\n".join([f"tsk_{s}\tpop1" for s in range(len(SAMPLES))])
+        lines = [f"{s}\tpop1\n" for s in SAMPLES]
+        
+        # Split the list into two populations
+        mid = len(SAMPLES) // 2
+        pop1 = lines[:mid]
+        pop2 = [line.replace("\tpop1", "\tpop2") for line in lines[mid:]]
+        
+        # Write to the output file
         with open(output[0], "w") as f:
-            f.writelines(lines)
+            f.writelines(pop1 + pop2)
 
 rule pixy_allsites:
     input:
@@ -245,6 +301,7 @@ rule pixy_allsites:
         pops = "vcf/pops.txt"
     output:
         allsites = "pixy_allsites/pixy_pi.txt",
+        dxy = "pixy_allsites/pixy_dxy.txt",
         
     params:
         windows=WINDOW_SIZE
@@ -254,7 +311,7 @@ rule pixy_allsites:
         "pixy"
     shell:
         """
-        pixy --stats pi --output_folder pixy_allsites --vcf {input.allsites} --window_size {params.windows} --populations {input.pops}
+        pixy --stats pi dxy fst --output_folder pixy_allsites --vcf {input.allsites} --window_size {params.windows} --populations {input.pops}
         """
 
 rule pixy_missing:
@@ -262,7 +319,8 @@ rule pixy_missing:
         varmissingvcf = "vcf/prop_{prop}/allsites_missing_{missingtype}.vcf.gz",
         pops = "vcf/pops.txt"
     output:
-        missing = "pixy_missing/prop_{prop}/{missingtype}/pixy_pi.txt"
+        missing = "pixy_missing/prop_{prop}/{missingtype}/pixy_pi.txt",
+        dxy = "pixy_missing/prop_{prop}/{missingtype}/pixy_dxy.txt"
     params:
         windows=WINDOW_SIZE,
         outdir= "pixy_missing/prop_{prop}/{missingtype}"
@@ -271,50 +329,32 @@ rule pixy_missing:
         "pixy"
     shell:
         """
-        pixy --stats pi --output_folder {params.outdir} --vcf {input.varmissingvcf} --window_size {params.windows} --populations {input.pops} || touch {output}
+        pixy --stats pi dxy fst --output_folder {params.outdir} --vcf {input.varmissingvcf} --window_size {params.windows} --populations {input.pops} || touch {output}
         """
 
 
 rule combine_pixy:
     input:
-        allsites = "pixy_allsites/pixy_pi.txt",
-        missing = expand("pixy_missing/prop_{prop}/{missingtype}/pixy_pi.txt", prop=PROPS, missingtype=MISSINGTYPES)
+        allsites_pi = "pixy_allsites/pixy_pi.txt",
+        allsites_dxy = "pixy_allsites/pixy_dxy.txt",
+        missing_pi = expand("pixy_missing/prop_{prop}/{missingtype}/pixy_pi.txt", prop=PROPS, missingtype=MISSINGTYPES),
+        missing_dxy = expand("pixy_missing/prop_{prop}/{missingtype}/pixy_dxy.txt", prop=PROPS, missingtype=MISSINGTYPES)
     output:
-        raw = "pixy_pi.tsv",
         ratio = "pixy_ratios.tsv"
     run:
         import pandas as pd
         from pathlib import Path
-        missing_dfs = []
-        for tsv in input.missing:
-            missingtype = Path(tsv).parent.name
-            prop = float(Path(tsv).parent.parent.name.split("_")[1])
-            try:
-                df = pd.read_csv(tsv, sep="\t")
-                df["missingtype"] = missingtype
-                df["prop"] = prop
-                
-                missing_dfs.append(df)
-            except pd.errors.EmptyDataError:
-                continue
-        missing_df = pd.concat(missing_dfs)
-
-        allsites_df = pd.read_csv(input.allsites, sep="\t")
         
-        # # Concatenate the two DataFrames
-        combined_df = pd.concat([allsites_df, missing_df], ignore_index=True)
-        combined_df.to_csv(output[0], sep="\t", index=False)
+        # Read allsites data first
+        allsites_pi = pd.read_csv(input.allsites_pi, sep="\t")
+        allsites_dxy = pd.read_csv(input.allsites_dxy, sep="\t")
         
-        merged_df = allsites_df.merge(
-            missing_df,
-            on=["chromosome", "window_pos_1", "window_pos_2", "pop"],
-            suffixes=("_allsites", "_missing")
-        )
-
-        # # Divide the 'pi' values: allsites / missing
-        merged_df['pi_ratio'] =  merged_df['avg_pi_missing'] / merged_df['avg_pi_allsites']
-        merged_df["tool"] = "pixy"
-        merged_df.to_csv(output[1], sep="\t", index=False)
+        results = []
+        for pi_tsv, dxy_tsv in zip(input.missing_pi, input.missing_dxy):
+            results.extend(process_stats(pi_tsv, dxy_tsv, allsites_pi, allsites_dxy, "pixy"))
+        
+        result_df = pd.DataFrame(results)
+        result_df.to_csv(output.ratio, sep="\t", index=False)
 
 
 
@@ -355,38 +395,40 @@ rule combine_vcftools:
         allsites = "vcftools_allsites/vcftools_pi.txt",
         missing = expand("vcftools_missing/prop_{prop}/{missingtype}/vcftools_pi.txt", prop=PROPS, missingtype=MISSINGTYPES)
     output:
-        raw = "vcftools_pi.tsv",
         ratio = "vcftools_ratios.tsv"
     run:
         import pandas as pd
         from pathlib import Path
-        missing_dfs = []
+        
+        allsites_df = pd.read_csv(input.allsites, sep="\t")
+        print("Allsites shape:", allsites_df.shape)
+        print("Allsites head:", allsites_df.head())
+        
+        results = []
+        
         for tsv in input.missing:
             missingtype = Path(tsv).parent.name
             prop = float(Path(tsv).parent.parent.name.split("_")[1])
             try:
                 df = pd.read_csv(tsv, sep="\t")
-                df["missingtype"] = missingtype
-                df["prop"] = prop
+            
                 
-                missing_dfs.append(df)
+                if not df.empty and not allsites_df.empty:
+                    result_dict = {
+                        "tool": "vcftools",
+                        "stat": "pi",
+                        "allsites_value": allsites_df['PI'].iloc[0] if len(allsites_df) > 0 else None,
+                        "missing_value": df['PI'].iloc[0] if len(df) > 0 else None,
+                        "missingtype": missingtype,
+                        "prop_missing": prop
+                    }
+                    results.append(result_dict)
             except pd.errors.EmptyDataError:
+                print(f"Empty file: {tsv}")
                 continue
-        missing_df = pd.concat(missing_dfs)
-
-        allsites_df = pd.read_csv(input.allsites, sep="\t")
-        
-        # # Concatenate the two DataFrames
-        combined_df = pd.concat([allsites_df, missing_df], ignore_index=True)
-        combined_df.to_csv(output[0], sep="\t", index=False)
-        
-        merged_df = allsites_df.merge(
-            missing_df,
-            on=["CHROM", "BIN_START", "BIN_END"],
-            suffixes=("_allsites", "_missing")
-        )
-
-        # # Divide the 'pi' values: allsites / missing
-        merged_df['pi_ratio'] =  merged_df['PI_missing'] / merged_df['PI_allsites']
-        merged_df["tool"] = "vcftools"
-        merged_df.to_csv(output[1], sep="\t", index=False)
+            except Exception as e:
+                print(f"Error processing {tsv}: {str(e)}")
+                continue
+                
+        result_df = pd.DataFrame(results)
+        result_df.to_csv(output.ratio, sep="\t", index=False)
